@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Aseguramos que el html y el body ocupen toda la pantalla sin márgenes raros */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #09090b; /* Equivale a bg-zinc-950 */
+}
