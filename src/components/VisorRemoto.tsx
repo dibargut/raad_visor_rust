@@ -84,6 +84,34 @@ export default function VisorRemoto() {
         });
     };
 
+    // 🔥 NUEVO: Manejar Scroll / Rueda del ratón
+    const manejarScroll = (e: React.WheelEvent<HTMLVideoElement>) => {
+        enviarComando({
+            event: "scroll",
+            delta_x: Math.round(e.deltaX),
+            delta_y: Math.round(-e.deltaY) // macOS suele requerir invertir el eje Y para scroll natural
+        });
+    };
+
+    // 🔥 NUEVO: Manejar pulsaciones del teclado
+    const manejarKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        // Evitamos que espacio o flechas hagan scroll en el propio navegador del visor
+        if (["Space", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
+            e.preventDefault();
+        }
+        enviarComando({
+            event: "key_down",
+            key: e.key
+        });
+    };
+
+    const manejarKeyUp = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        enviarComando({
+            event: "key_up",
+            key: e.key
+        });
+    };
+
     const conectarAgente = (e: React.FormEvent) => {
         e.preventDefault();
         setAutenticado(true);
@@ -231,8 +259,13 @@ export default function VisorRemoto() {
                     </button>
                 </form>
             ) : (
-                /* 🔥 CAMBIO A max-w-7xl PARA RESPALDAR LOS 1280x720p DEL AGENTE CON TOTAL NITIDEZ */
-                <div className="flex flex-col items-center gap-4 w-full max-w-7xl">
+                /* 🔥 tabIndex={0} y listeners añadidos aquí para poder capturar inputs de teclado al hacer clic en el contenedor */
+                <div 
+                    className="flex flex-col items-center gap-4 w-full max-w-7xl focus:outline-none"
+                    tabIndex={0}
+                    onKeyDown={manejarKeyDown}
+                    onKeyUp={manejarKeyUp}
+                >
                     <div className="flex items-center justify-between w-full bg-zinc-900 px-5 py-2 rounded-full border border-zinc-800 shadow">
                         <div className="flex items-center gap-3">
                             <div className={`w-3 h-3 rounded-full ${estado === "TRANSMITIENDO EN VIVO" ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`} />
@@ -257,6 +290,7 @@ export default function VisorRemoto() {
                             onMouseMove={manejarMouseMove}
                             onMouseDown={manejarMouseDown}
                             onMouseUp={manejarMouseUp}
+                            onWheel={manejarScroll} 
                             className="w-full h-full object-contain cursor-crosshair"
                         />
                     </div>
