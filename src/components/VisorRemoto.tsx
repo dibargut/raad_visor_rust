@@ -47,7 +47,7 @@ export default function VisorRemoto() {
 
     const manejarMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
         const ahora = Date.now();
-        if (ahora - lastMouseMove.current < 33) return; // Throttling a ~30Hz
+        if (ahora - lastMouseMove.current < 33) return; 
         lastMouseMove.current = ahora;
 
         const coords = obtenerCoordenadasRelativas(e);
@@ -84,18 +84,15 @@ export default function VisorRemoto() {
         });
     };
 
-    // 🔥 NUEVO: Manejar Scroll / Rueda del ratón
     const manejarScroll = (e: React.WheelEvent<HTMLVideoElement>) => {
         enviarComando({
             event: "scroll",
             delta_x: Math.round(e.deltaX),
-            delta_y: Math.round(-e.deltaY) // macOS suele requerir invertir el eje Y para scroll natural
+            delta_y: Math.round(-e.deltaY) 
         });
     };
 
-    // 🔥 NUEVO: Manejar pulsaciones del teclado
     const manejarKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-        // Evitamos que espacio o flechas hagan scroll en el propio navegador del visor
         if (["Space", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
             e.preventDefault();
         }
@@ -143,6 +140,7 @@ export default function VisorRemoto() {
             try {
                 setEstado("Autenticando...");
 
+                // 1. LOGIN
                 const res = await fetch(`http://${backendHost}/api/remote/auth/login`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -152,6 +150,19 @@ export default function VisorRemoto() {
                 if (!res.ok) throw new Error("Error de autenticación");
                 const { access_token } = await res.json();
 
+                // 🚀 2. EL ESLABÓN PERDIDO: Solicitar conexión al Agente
+                setEstado("Solicitando conexión al Agente...");
+                const solicitudRes = await fetch(`http://${backendHost}/api/remote/session/${SESSION_UUID}/solicitar-conexion`, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${access_token}` 
+                    }
+                });
+
+                if (!solicitudRes.ok) throw new Error("No se pudo despertar al Agente. ¿Está encendido?");
+
+                // 3. ABRIR SEÑALIZACIÓN (Ahora el agente sí generará la oferta)
                 setEstado("Conectando señalización...");
 
                 const ws = new WebSocket(`ws://${backendHost}/api/remote/signaling/${SESSION_UUID}/visor?token=${access_token}`);
@@ -259,7 +270,6 @@ export default function VisorRemoto() {
                     </button>
                 </form>
             ) : (
-                /* 🔥 tabIndex={0} y listeners añadidos aquí para poder capturar inputs de teclado al hacer clic en el contenedor */
                 <div 
                     className="flex flex-col items-center gap-4 w-full max-w-7xl focus:outline-none"
                     tabIndex={0}
