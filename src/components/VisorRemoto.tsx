@@ -22,11 +22,14 @@ export default function VisorRemoto() {
     const [verificando, setVerificando] = useState<boolean>(false);
     const [subiendoArchivo, setSubiendoArchivo] = useState<boolean>(false);
 
+    const [mostrarModalPortapapeles, setMostrarModalPortapapeles] = useState<boolean>(false);
+    const [textoPortapapeles, setTextoPortapapeles] = useState<string>("");
+
     const [backendHost, setBackendHost] = useState<string>("192.168.1.135:8080");
-    const [email, setEmail] = useState<string>(""); // 🔥 NUEVO: Estado para el correo
+    const [email, setEmail] = useState<string>(""); 
     const [password, setPassword] = useState<string>("TuContrasenaSeguraAqui");
 
-    const SESSION_UUID = "test-session-123";
+    const SESSION_UUID = "SRA-AGENT-PC01";
     const lastMouseMove = useRef<number>(0);
     const frameCountRef = useRef<number>(0);
     const animationFrameIdRef = useRef<number | null>(null);
@@ -155,6 +158,13 @@ export default function VisorRemoto() {
         }
     };
 
+    const sincronizarPortapapeles = () => {
+        enviarComando({ event: "clipboard_sync", text: textoPortapapeles });
+        setMostrarModalPortapapeles(false);
+        setTextoPortapapeles("");
+        alert("Portapapeles sincronizado.");
+    };
+
     useEffect(() => {
         if (!autenticado) return;
 
@@ -179,7 +189,6 @@ export default function VisorRemoto() {
 
                 setEstado("Solicitando conexión al Agente...");
                 
-                // 🔥 NUEVO: Enviamos el correo en el cuerpo de la petición HTTP
                 const solicitudRes = await fetch(`http://${backendHost}/api/remote/session/${SESSION_UUID}/solicitar-conexion`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${access_token}` },
@@ -269,7 +278,6 @@ export default function VisorRemoto() {
 
                     <input type="text" value={backendHost} onChange={(e) => { setBackendHost(e.target.value); setAgenteOnline(null); }} className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500" placeholder="Host (ej. 192.168.1.135:8080)" />
                     
-                    {/* 🔥 NUEVO: Input de Correo */}
                     <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500" placeholder="Tu correo corporativo" />
                     
                     <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500" placeholder="Contraseña de sesión" />
@@ -283,35 +291,32 @@ export default function VisorRemoto() {
                     <div className="flex items-center justify-between w-full bg-zinc-900 px-5 py-2 rounded-full border border-zinc-800 shadow">
                         <div className="flex items-center gap-3">
                             <div className={`w-3 h-3 rounded-full ${estado === "TRANSMITIENDO EN VIVO" ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`} />
-                            <span className="font-mono text-xs uppercase tracking-wide">
-                                {estado} {fps > 0 && `• ${fps} FPS`}
-                            </span>
+                            <span className="font-mono text-xs uppercase tracking-wide">{estado} {fps > 0 && `• ${fps} FPS`}</span>
                         </div>
-                        
                         <div className="flex items-center gap-3">
-                            <input 
-                                type="file" 
-                                ref={fileInputRef} 
-                                style={{ display: 'none' }} 
-                                accept=".bin,.out,.tgz,.img,.iso,.qcow2,.txt,.cfg" 
-                                onChange={manejarSubidaArchivo}
-                            />
-                            <button 
-                                onClick={() => fileInputRef.current?.click()}
-                                disabled={subiendoArchivo}
-                                className={`font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide border ${subiendoArchivo ? 'bg-zinc-800 border-zinc-700 text-zinc-500' : 'bg-blue-950 hover:bg-blue-900 border-blue-800 text-blue-200'}`}
-                            >
-                                {subiendoArchivo ? '⏳ SUBIENDO...' : '📎 SUBIR ARCHIVO'}
-                            </button>
-
-                            <button onClick={cerrarSesion} className="bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide">
-                                CERRAR SESIÓN
-                            </button>
+                            <button onClick={() => setMostrarModalPortapapeles(true)} className="bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-200 font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide">📋 PORTAPAPELES</button>
+                            <input type="file" ref={fileInputRef} style={{ display: 'none' }} accept=".bin,.out,.tgz,.img,.iso,.qcow2,.txt,.cfg" onChange={manejarSubidaArchivo}/>
+                            <button onClick={() => fileInputRef.current?.click()} disabled={subiendoArchivo} className={`font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide border ${subiendoArchivo ? 'bg-zinc-800 border-zinc-700 text-zinc-500' : 'bg-blue-950 hover:bg-blue-900 border-blue-800 text-blue-200'}`}>{subiendoArchivo ? '⏳ SUBIENDO...' : '📎 SUBIR ARCHIVO'}</button>
+                            <button onClick={cerrarSesion} className="bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide">CERRAR SESIÓN</button>
                         </div>
                     </div>
                     
                     <div className="relative w-full aspect-video bg-black rounded-xl overflow-hidden shadow-2xl border border-zinc-800 flex items-center justify-center">
-                        <video ref={videoRef} autoPlay playsInline muted onMouseMove={manejarMouseMove} onMouseDown={manejarMouseDown} onMouseUp={manejarMouseUp} onWheel={manejarScroll} className="w-full h-full object-contain cursor-crosshair" />
+                        <video ref={videoRef} autoPlay playsInline muted onMouseMove={manejarMouseMove} onMouseDown={manejarMouseDown} onMouseUp={manejarMouseUp} onWheel={manejarScroll} onContextMenu={(e) => e.preventDefault()} className="w-full h-full object-contain cursor-crosshair" />
+                    </div>
+                </div>
+            )}
+
+            {mostrarModalPortapapeles && (
+                <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+                    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 w-full max-w-lg shadow-2xl flex flex-col gap-4">
+                        <h3 className="text-lg font-bold font-mono text-emerald-400">📋 Sincronizar Portapapeles</h3>
+                        <p className="text-xs text-zinc-400">Pega aquí el texto → el equipo remoto. Una vez sincronizado, podrás hacer Click Derecho → Pegar.</p>
+                        <textarea value={textoPortapapeles} onChange={(e) => setTextoPortapapeles(e.target.value)} className="w-full h-32 bg-zinc-950 border border-zinc-700 rounded p-3 text-sm font-mono focus:outline-none focus:border-emerald-500 resize-none text-zinc-200" placeholder="Pega tu texto aquí..." autoFocus />
+                        <div className="flex gap-2 justify-end mt-2">
+                            <button onClick={() => setMostrarModalPortapapeles(false)} className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold font-mono text-xs rounded transition-colors">CANCELAR</button>
+                            <button onClick={sincronizarPortapapeles} disabled={!textoPortapapeles} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-bold font-mono text-xs rounded transition-colors">SINCRONIZAR AHORA</button>
+                        </div>
                     </div>
                 </div>
             )}
