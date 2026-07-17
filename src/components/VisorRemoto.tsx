@@ -20,25 +20,32 @@ export default function VisorRemoto() {
     const [fps, setFps] = useState<number>(0);
     const [agenteOnline, setAgenteOnline] = useState<boolean | null>(null);
     const [verificando, setVerificando] = useState<boolean>(false);
+    
     const [subiendoArchivo, setSubiendoArchivo] = useState<boolean>(false);
+    const [progresoUpload, setProgresoUpload] = useState<number>(0);
 
     const [mostrarModalPortapapeles, setMostrarModalPortapapeles] = useState<boolean>(false);
     const [textoPortapapeles, setTextoPortapapeles] = useState<string>("");
 
     const [backendHost, setBackendHost] = useState<string>("192.168.1.135:8080");
+    const [sessionUuid, setSessionUuid] = useState<string>("SRA-AGENT-PC01"); 
     const [email, setEmail] = useState<string>(""); 
-    const [password, setPassword] = useState<string>("TuContrasenaSeguraAqui");
 
-    const SESSION_UUID = "SRA-AGENT-PC01";
+    // 🔥 PON TU CONTRASEÑA REAL AQUÍ. Se enviará de forma invisible al backend.
+    const PASSWORD_SECRETA = "TuContrasenaSeguraAqui";
+
     const lastMouseMove = useRef<number>(0);
     const frameCountRef = useRef<number>(0);
     const animationFrameIdRef = useRef<number | null>(null);
 
     const verificarEstadoAgente = useCallback(async () => {
-        if (!backendHost) return;
+        if (!backendHost || !sessionUuid) {
+            setAgenteOnline(false);
+            return;
+        }
         setVerificando(true);
         try {
-            const res = await fetch(`http://${backendHost}/api/remote/session/${SESSION_UUID}/status`);
+            const res = await fetch(`http://${backendHost}/api/remote/session/${sessionUuid}/status`);
             if (res.ok) {
                 const data = await res.json();
                 setAgenteOnline(data.agente_online === true);
@@ -50,7 +57,7 @@ export default function VisorRemoto() {
         } finally {
             setVerificando(false);
         }
-    }, [backendHost, SESSION_UUID]);
+    }, [backendHost, sessionUuid]); 
 
     useEffect(() => {
         verificarEstadoAgente();
@@ -108,7 +115,7 @@ export default function VisorRemoto() {
 
     const conectarAgente = (e: React.FormEvent) => {
         e.preventDefault();
-        if (!agenteOnline || !email) return;
+        if (!agenteOnline || !email || !sessionUuid) return;
         setAutenticado(true);
     };
 
@@ -130,31 +137,60 @@ export default function VisorRemoto() {
         verificarEstadoAgente();
     }, [verificarEstadoAgente]);
 
+    // =======================================================================
+    // 🚀 MOTOR P2P: TRANSFERENCIA DE ARCHIVOS SEGURA (WAN-SAFE)
+    // =======================================================================
     const manejarSubidaArchivo = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
-        if (!file || !token) return;
+        if (!file) return;
+
+        if (!dataChannelRef.current || dataChannelRef.current.readyState !== 'open') {
+            alert("Error: El canal P2P no está abierto.");
+            if (fileInputRef.current) fileInputRef.current.value = "";
+            return;
+        }
 
         setSubiendoArchivo(true);
-        const formData = new FormData();
-        formData.append("file", file);
+        setProgresoUpload(0);
 
         try {
-            const res = await fetch(`http://${backendHost}/api/portal/stream-upload/${SESSION_UUID}`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
-                body: formData
-            });
+            enviarComando({ action: "start", filename: file.name, filesize: file.size });
 
-            if (!res.ok) {
-                const errorData = await res.json();
-                throw new Error(errorData.detail || "Error al transferir el binario");
+            const chunkSize = 16384; // 16 KB exactos para evitar fragmentación en Internet
+            const bufferThreshold = 2 * 1024 * 1024; // 2 MB máximo en la memoria del navegador
+            let offset = 0;
+            let lastUiUpdate = 0;
+
+            while (offset < file.size) {
+                // Contrapresión: Si el tubo de Internet está lleno, dormimos 5ms
+                if (dataChannelRef.current.bufferedAmount >= bufferThreshold) {
+                    await new Promise(resolve => setTimeout(resolve, 5));
+                    continue; 
+                }
+
+                const slice = file.slice(offset, offset + chunkSize);
+                const chunk = await slice.arrayBuffer();
+                dataChannelRef.current.send(chunk);
+                offset += chunkSize;
+                
+                // Actualización limpia de UI
+                const currentPercent = Math.min(100, Math.floor((offset / file.size) * 100));
+                if (currentPercent > lastUiUpdate) {
+                    setProgresoUpload(currentPercent);
+                    lastUiUpdate = currentPercent;
+                }
             }
-            alert("Archivo enviado con éxito al Agente.");
+
+            enviarComando({ action: "end" });
+            
         } catch (err: any) {
-            alert(`Fallo en la transferencia: ${err.message}`);
+            alert(`Fallo en la transferencia P2P: ${err.message}`);
         } finally {
-            setSubiendoArchivo(false);
-            if (fileInputRef.current) fileInputRef.current.value = "";
+            setTimeout(() => {
+                setSubiendoArchivo(false);
+                setProgresoUpload(0);
+                if (fileInputRef.current) fileInputRef.current.value = "";
+            }, 1000);
         }
     };
 
@@ -176,20 +212,22 @@ export default function VisorRemoto() {
 
         async function iniciarConexion() {
             try {
-                setEstado("Autenticando...");
+                setEstado("Autenticando de forma invisible...");
+                
+                // 🔥 Inyección silenciosa de la contraseña real
                 const res = await fetch(`http://${backendHost}/api/remote/auth/login`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password: password })
+                    body: JSON.stringify({ password: PASSWORD_SECRETA }) 
                 });
 
-                if (!res.ok) throw new Error("Error de autenticación");
+                if (!res.ok) throw new Error("Error de autenticación silenciosa (Revisa PASSWORD_SECRETA)");
                 const { access_token } = await res.json();
                 setToken(access_token);
 
                 setEstado("Solicitando conexión al Agente...");
                 
-                const solicitudRes = await fetch(`http://${backendHost}/api/remote/session/${SESSION_UUID}/solicitar-conexion`, {
+                const solicitudRes = await fetch(`http://${backendHost}/api/remote/session/${sessionUuid}/solicitar-conexion`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${access_token}` },
                     body: JSON.stringify({ email: email }) 
@@ -198,7 +236,7 @@ export default function VisorRemoto() {
                 if (!solicitudRes.ok) throw new Error("No se pudo despertar al Agente.");
 
                 setEstado("Conectando señalización...");
-                const ws = new WebSocket(`ws://${backendHost}/api/remote/signaling/${SESSION_UUID}/visor?token=${access_token}`);
+                const ws = new WebSocket(`ws://${backendHost}/api/remote/signaling/${sessionUuid}/visor?token=${access_token}`);
                 wsRef.current = ws;
 
                 ws.onclose = () => { cerrarSesion(); };
@@ -258,7 +296,7 @@ export default function VisorRemoto() {
             clearInterval(fpsInterval);
             cerrarSesion();
         };
-    }, [autenticado, backendHost, password, email, cerrarSesion]);
+    }, [autenticado, backendHost, email, cerrarSesion, sessionUuid]);
 
     return (
         <div className="bg-zinc-950 w-screen h-screen flex flex-col items-center justify-center text-white p-4">
@@ -278,11 +316,11 @@ export default function VisorRemoto() {
 
                     <input type="text" value={backendHost} onChange={(e) => { setBackendHost(e.target.value); setAgenteOnline(null); }} className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500" placeholder="Host (ej. 192.168.1.135:8080)" />
                     
+                    <input type="text" value={sessionUuid} onChange={(e) => { setSessionUuid(e.target.value); setAgenteOnline(null); }} required className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500 text-blue-400" placeholder="ID del Agente (ej. SRA-AGENT-PC01)" />
+                    
                     <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500" placeholder="Tu correo corporativo" />
                     
-                    <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-zinc-950 border border-zinc-700 p-2 rounded text-sm font-mono focus:outline-none focus:border-green-500" placeholder="Contraseña de sesión" />
-                    
-                    <button type="submit" disabled={!agenteOnline || verificando || !email} className={`py-2 rounded font-bold font-mono text-sm tracking-wider transition-colors ${agenteOnline && email ? 'bg-green-600 hover:bg-green-500 text-white cursor-pointer' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'}`}>
+                    <button type="submit" disabled={!agenteOnline || verificando || !email || !sessionUuid} className={`py-2 rounded font-bold font-mono text-sm tracking-wider transition-colors ${agenteOnline && email ? 'bg-green-600 hover:bg-green-500 text-white cursor-pointer' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'}`}>
                         {agenteOnline ? 'CONECTAR' : 'NO DISPONIBLE'}
                     </button>
                 </form>
@@ -295,8 +333,20 @@ export default function VisorRemoto() {
                         </div>
                         <div className="flex items-center gap-3">
                             <button onClick={() => setMostrarModalPortapapeles(true)} className="bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-200 font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide">📋 PORTAPAPELES</button>
-                            <input type="file" ref={fileInputRef} style={{ display: 'none' }} accept=".bin,.out,.tgz,.img,.iso,.qcow2,.txt,.cfg" onChange={manejarSubidaArchivo}/>
-                            <button onClick={() => fileInputRef.current?.click()} disabled={subiendoArchivo} className={`font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide border ${subiendoArchivo ? 'bg-zinc-800 border-zinc-700 text-zinc-500' : 'bg-blue-950 hover:bg-blue-900 border-blue-800 text-blue-200'}`}>{subiendoArchivo ? '⏳ SUBIENDO...' : '📎 SUBIR ARCHIVO'}</button>
+                            
+                            <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={manejarSubidaArchivo}/>
+                            
+                            {subiendoArchivo ? (
+                                <div className="flex items-center gap-2 bg-zinc-950 border border-zinc-800 rounded-full px-3 py-1 w-48 shadow-inner">
+                                    <span className="text-xs font-mono text-blue-400 font-bold w-8 text-right">{progresoUpload}%</span>
+                                    <div className="w-full bg-zinc-900 rounded-full h-1.5 overflow-hidden">
+                                        <div className="bg-blue-500 h-full transition-all duration-100 ease-linear shadow-[0_0_8px_rgba(59,130,246,0.8)]" style={{ width: `${progresoUpload}%` }} />
+                                    </div>
+                                </div>
+                            ) : (
+                                <button onClick={() => fileInputRef.current?.click()} className="bg-blue-950 hover:bg-blue-900 border border-blue-800 text-blue-200 font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide">📎 SUBIR ARCHIVO</button>
+                            )}
+
                             <button onClick={cerrarSesion} className="bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 font-mono text-xs px-3 py-1 rounded-full transition-colors font-bold tracking-wide">CERRAR SESIÓN</button>
                         </div>
                     </div>
