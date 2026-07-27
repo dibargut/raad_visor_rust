@@ -6,9 +6,10 @@ import '@xterm/xterm/css/xterm.css';
 interface TerminalLiteProps {
     uuid: string;
     backendHost: string;
+    token: string; // 🔥 Requerido para la conexión WS segura
 }
 
-export default function TerminalLite({ uuid, backendHost }: TerminalLiteProps) {
+export default function TerminalLite({ uuid, backendHost, token }: TerminalLiteProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const termRef = useRef<Terminal | null>(null);
@@ -50,7 +51,8 @@ export default function TerminalLite({ uuid, backendHost }: TerminalLiteProps) {
 
         term.writeln(`Conectando al túnel de gestión seguro para el nodo ${uuid}...`);
 
-        const wsUrl = `ws://${backendHost}/api/remote/lite/web/${uuid}`;
+        // 🔥 MODIFICADO: Uso de wss:// seguro y envío del token en la URL
+        const wsUrl = `wss://${backendHost}/api/remote/lite/web/${uuid}?token=${token}`;
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
@@ -100,11 +102,12 @@ export default function TerminalLite({ uuid, backendHost }: TerminalLiteProps) {
             ws.close();
             term.dispose();
         };
-    }, [uuid, backendHost]);
+    }, [uuid, backendHost, token]);
 
     const enviarComando = async (action: string, params: Record<string, any> = {}) => {
         try {
-            await fetch(`http://${backendHost}/api/remote/lite/command/${uuid}`, {
+            // 🔥 MODIFICADO: Protocolo HTTPS seguro en lugar de HTTP
+            await fetch(`https://${backendHost}/api/remote/lite/command/${uuid}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action, params })

@@ -23,6 +23,7 @@ export default function VisorRemoto() {
     const streamRef = useRef<MediaStream | null>(null);
     
     const cierreSesionVoluntarioRef = useRef<boolean>(false);
+    const fallosConsecutivos = useRef<number>(0);
     const audioCtxRef = useRef<AudioContext | any>(null);
 
     const [autenticado, setAutenticado] = useState<boolean>(false);
@@ -44,7 +45,7 @@ export default function VisorRemoto() {
     const [ipManual, setIpManual] = useState<string>("");
     const [subnetManual, setSubnetManual] = useState<string>("255.255.255.0");
     const [gwManual, setGwManual] = useState<string>("");
-    const [dnsManual, setDnsManual] = useState<string>("");
+    const [dnsManual, setDnsManual] = useState<string>(""); 
 
     const [urlNavegacion, setUrlNavegacion] = useState<string>("http://192.168.1.1");
     const [agenteDesconectadoError, setAgenteDesconectadoError] = useState<boolean>(false);
@@ -102,7 +103,6 @@ export default function VisorRemoto() {
                 setAgenteOnline(false);
             }
         } catch (error) { 
-            console.error("API Fetch Error:", error);
             setAgenteOnline(false); 
         } 
         finally { setVerificando(false); }
@@ -110,7 +110,6 @@ export default function VisorRemoto() {
 
     useEffect(() => { verificarEstadoAgente(); }, [verificarEstadoAgente]);
 
-    // 🔥 LOOP DE LA SALA DE ESPERA (Escuchando aprobación o rechazo del Admin)
     useEffect(() => {
         if (!esperandoAprobacion) return;
 
@@ -124,7 +123,6 @@ export default function VisorRemoto() {
                         setEstado("C:\\>_ APROBADO. El Sentinel ha lanzado el entorno. Conectando...");
                         setAutenticado(true);
                     } else if (String(data.operator_requested) === "false" || !data.operator_requested) {
-                        // El administrador pulsó DENEGAR (eliminó la bandera en Redis)
                         setEsperandoAprobacion(false);
                         setEstado("ACCESO DENEGADO por el SRA Admin Center.");
                     }
@@ -137,27 +135,64 @@ export default function VisorRemoto() {
 
     useEffect(() => {
         if (!autenticado) return;
+        
         let gracePeriod = true;
-        setTimeout(() => { gracePeriod = false; }, 10000);
+        setTimeout(() => { gracePeriod = false; }, 8000);
 
         const intervalId = setInterval(async () => {
+            if (cierreSesionVoluntarioRef.current) return;
+
             try {
                 const res = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`);
                 if (res.ok) {
                     const data = await res.json();
-                    if (!data.is_online && !gracePeriod && !cierreSesionVoluntarioRef.current) {
-                        setAgenteDesconectadoError(true);
+                    if (!data.is_online && !gracePeriod) {
+                        fallosConsecutivos.current += 1;
+                        if (fallosConsecutivos.current >= 3) {
+                            setAgenteDesconectadoError(true);
+                        }
+                    } else {
+                        fallosConsecutivos.current = 0;
                     }
                 } else { 
-                    if (!gracePeriod && !cierreSesionVoluntarioRef.current) setAgenteDesconectadoError(true); 
+                    if (!gracePeriod) {
+                        fallosConsecutivos.current += 1;
+                        if (fallosConsecutivos.current >= 3) setAgenteDesconectadoError(true); 
+                    }
                 }
             } catch (error) { 
-                if (!gracePeriod && !cierreSesionVoluntarioRef.current) setAgenteDesconectadoError(true); 
+                if (!gracePeriod) {
+                    fallosConsecutivos.current += 1;
+                    if (fallosConsecutivos.current >= 3) setAgenteDesconectadoError(true); 
+                }
             }
-        }, 3000);
+        }, 2000);
         
         return () => clearInterval(intervalId);
     }, [autenticado, backendHost, sessionUuid]);
+
+    useEffect(() => {
+        if (agenteDesconectadoError && audioCtxRef.current) {
+            try {
+                const ctx = audioCtxRef.current;
+                if (ctx.state === 'suspended') ctx.resume();
+                const freqs = [392.00, 493.88, 587.33];
+                freqs.forEach(f => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = f;
+                    gain.gain.setValueAtTime(0, ctx.currentTime);
+                    gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + 0.05);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.5);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start();
+                    osc.stop(ctx.currentTime + 1.5);
+                });
+            } catch (e) {}
+        }
+    }, [agenteDesconectadoError]);
 
     const enviarComandoSistema = useCallback(async (action: string, params: any = {}) => {
         try {
@@ -171,18 +206,84 @@ export default function VisorRemoto() {
 
     const enviarComando = useCallback((comando: any) => {
         const payload = JSON.stringify(comando);
-        if (dataChannelRef.current?.readyState === 'open') {
+        if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
             dataChannelRef.current.send(payload);
-        } else if (wsRef.current?.readyState === WebSocket.OPEN) {
+        } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(payload);
         }
     }, []);
+
+    useEffect(() => {
+        const handleKD = (e: KeyboardEvent) => {
+            if (vistaActiva !== "video" || agenteDesconectadoError) return;
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+            if (["Space", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); }
+            enviarComando({ event: "key_down", key: e.key });
+        };
+        const handleKU = (e: KeyboardEvent) => {
+            if (vistaActiva !== "video" || agenteDesconectadoError) return;
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+            enviarComando({ event: "key_up", key: e.key });
+        };
+        window.addEventListener('keydown', handleKD, { passive: false });
+        window.addEventListener('keyup', handleKU, { passive: false });
+        return () => { window.removeEventListener('keydown', handleKD); window.removeEventListener('keyup', handleKU); };
+    }, [vistaActiva, agenteDesconectadoError, enviarComando]);
+
+    const obtenerCoordenadasRelativas = (e: React.MouseEvent<HTMLVideoElement>): CoordenadasRelativas | null => {
+        if (!videoRef.current) return null;
+        const video = videoRef.current;
+        const rect = video.getBoundingClientRect();
+        if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+        const videoRatio = video.videoWidth / video.videoHeight;
+        const elementRatio = rect.width / rect.height;
+        let renderWidth, renderHeight, xOffset = 0, yOffset = 0;
+
+        if (elementRatio > videoRatio) {
+            renderHeight = rect.height;
+            renderWidth = renderHeight * videoRatio;
+            xOffset = (rect.width - renderWidth) / 2;
+        } else {
+            renderWidth = rect.width;
+            renderHeight = renderWidth / videoRatio;
+            yOffset = (rect.height - renderHeight) / 2;
+        }
+
+        const x_pixel = e.clientX - rect.left - xOffset;
+        const y_pixel = e.clientY - rect.top - yOffset;
+        if (x_pixel < 0 || x_pixel > renderWidth || y_pixel < 0 || y_pixel > renderHeight) return null;
+        return { x: x_pixel, y: y_pixel, w: renderWidth, h: renderHeight };
+    };
+
+    const manejarMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
+        const ahora = Date.now();
+        if (ahora - lastMouseMove.current < 33) return; 
+        lastMouseMove.current = ahora;
+        const coords = obtenerCoordenadasRelativas(e);
+        if (coords) enviarComando({ event: "mouse_move", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+    };
+
+    const manejarMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
+        const coords = obtenerCoordenadasRelativas(e);
+        if (coords) enviarComando({ event: "mouse_down", button: e.button === 2 ? "right" : "left", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+    };
+
+    const manejarMouseUp = (e: React.MouseEvent<HTMLVideoElement>) => {
+        const coords = obtenerCoordenadasRelativas(e);
+        if (coords) enviarComando({ event: "mouse_up", button: e.button === 2 ? "right" : "left", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+    };
+
+    const manejarScroll = (e: React.WheelEvent<HTMLVideoElement>) => {
+        enviarComando({ event: "scroll", delta_x: Math.round(e.deltaX), delta_y: Math.round(-e.deltaY) });
+    };
 
     const conectarAgente = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!agenteOnline || !email || !sessionUuid) return;
         initAudio(); 
         cierreSesionVoluntarioRef.current = false;
+        fallosConsecutivos.current = 0; 
         
         try {
             setVerificando(true);
@@ -202,7 +303,6 @@ export default function VisorRemoto() {
 
             setEstado("Llamando a la puerta...");
             
-            // 🔥 INYECCIÓN DE LA SOLICITUD A LA API (Para el Admin Center)
             await fetch(`https://${backendHost}/api/app/request-access/${sessionUuid}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -231,10 +331,12 @@ export default function VisorRemoto() {
 
     useEffect(() => {
         if (autenticado && token && vistaActiva === "video") {
+            let isCleaningUp = false; 
+            
             const ws = new WebSocket(`wss://${backendHost}/api/remote/signaling/${sessionUuid}/visor?token=${token}`);
             wsRef.current = ws;
 
-            ws.onclose = () => { console.log("ℹ️ [SEÑALIZACIÓN] Socket cerrado intencionadamente."); };
+            ws.onclose = () => { console.log("ℹ️ [SEÑALIZACIÓN] Socket cerrado."); };
 
             ws.onmessage = async (event) => {
                 const msg = JSON.parse(event.data);
@@ -247,14 +349,27 @@ export default function VisorRemoto() {
                     peerRef.current = pc;
 
                     pc.oniceconnectionstatechange = () => {
-                        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') { setEstado("🟢 ENLACE P2P ESTABLECIDO"); } 
-                        else if (pc.iceConnectionState === 'failed') { setEstado("🔴 P2P BLOQUEADO"); }
+                        if (isCleaningUp) return; 
+                        
+                        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') { 
+                            setEstado("🟢 ENLACE P2P ESTABLECIDO"); 
+                        } 
+                        else if (pc.iceConnectionState === 'disconnected') {
+                            setEstado("⚠️ INTERFERENCIA RED. Recuperando P2P...");
+                        }
+                        else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') { 
+                            setEstado("🔴 P2P FALLIDO. Reconexión imposible."); 
+                            if (!cierreSesionVoluntarioRef.current) {
+                                setAgenteDesconectadoError(true);
+                            }
+                        }
                     };
 
                     pc.onicecandidate = (e) => { if (e.candidate && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ ice: e.candidate })); } };
                     pc.addTransceiver('video', { direction: 'recvonly' });
                     
                     const dc = pc.createDataChannel("control");
+                    dc.onopen = () => console.log("✅ [DATOS] Canal asegurado.");
                     dataChannelRef.current = dc;
 
                     pc.ontrack = (e) => {
@@ -263,6 +378,7 @@ export default function VisorRemoto() {
                         if (videoRef.current) {
                             videoRef.current.srcObject = stream;
                             videoRef.current.play().catch(err => console.warn("AutoPlay bloqueado:", err));
+                            videoRef.current.focus(); 
                         }
                         if (!animationFrameIdRef.current) contarFrames();
                     };
@@ -283,7 +399,13 @@ export default function VisorRemoto() {
                     else if (peerRef.current) { try { await peerRef.current.addIceCandidate(new RTCIceCandidate(msg.ice)); } catch (e) {} }
                 }
             };
-            return () => { ws.close(); wsRef.current = null; };
+            
+            return () => { 
+                isCleaningUp = true;
+                if (peerRef.current) { peerRef.current.close(); peerRef.current = null; }
+                if (dataChannelRef.current) { dataChannelRef.current.close(); dataChannelRef.current = null; }
+                ws.close(); wsRef.current = null; 
+            };
         }
     }, [autenticado, token, backendHost, sessionUuid, contarFrames, vistaActiva]);
 
@@ -298,14 +420,19 @@ export default function VisorRemoto() {
         setVistaActiva("video");
         setEstado("C:\\>_ Levantando Túnel Pesado...");
         enviarComandoSistema("init_p2p");
-        setTimeout(() => enviarComandoSistema("start_kiosk"), 2000);
+        setTimeout(() => enviarComandoSistema("start_kiosk", { url: urlNavegacion }), 2000);
+    };
+
+    const abrirMinicom = () => {
+        setVistaActiva("terminal");
+        setEstado("C:\\>_ Enlazando Terminal Serie Web...");
     };
 
     const volverAlEscritorio = () => {
-        enviarComandoSistema("kill_all"); 
+        enviarComandoSistema("stop_kiosk"); 
         if (videoRef.current) { videoRef.current.srcObject = null; }
         setVistaActiva("desktop");
-        setEstado("C:\\>_ Procesos detenidos. (0% CPU)");
+        setEstado("C:\\>_ Kiosco cerrado. SRA-Operator hibernando en segundo plano.");
         setFps(0);
     };
     
@@ -317,7 +444,6 @@ export default function VisorRemoto() {
     const cerrarSesion = useCallback(() => {
         enviarComandoSistema("logout"); 
         
-        // 🔥 LIMPIAMOS LA BATISEÑAL EN EL SERVIDOR PARA QUE EL SENTINEL MATE EL PROCESO
         fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { method: 'POST' }).catch(() => {});
         
         cierreSesionVoluntarioRef.current = true;
@@ -334,7 +460,114 @@ export default function VisorRemoto() {
         setVistaActiva("desktop");
     }, [enviarComandoSistema, backendHost, sessionUuid]);
 
-    // Resto de la UI (Pantalla de login, sala de espera, etc...)
+    // 🔥 PUNTO 1 RESUELTO: Empieza a enviar en cuanto el WS abre, sin esperar un texto.
+    const manejarSubidaArchivo = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        uploadAbortControllerRef.current = new AbortController();
+        const signal = uploadAbortControllerRef.current.signal;
+        setSubiendoArchivo(true);
+        setProgresoUpload(0);
+        setEstado(`C:\\>_ Conectando túnel para ${file.name}...`);
+
+        try {
+            const wsUrl = `wss://${backendHost}/api/remote/lite/web/${sessionUuid}?token=${token || ""}`;
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = async () => {
+                setEstado(`C:\\>_ Túnel listo. Preparando archivo...`);
+                await enviarComandoSistema("start_file_transfer", { filename: file.name, size: file.size });
+
+                // Damos 500ms al servidor Rust para que procese el JSON y abra el archivo en disco
+                setTimeout(() => {
+                    const chunkSize = 64 * 1024;
+                    let offset = 0;
+                    let lastUiUpdate = 0;
+
+                    const readNextChunk = () => {
+                        if (signal.aborted) {
+                            ws.close();
+                            throw new Error("ABORT");
+                        }
+                        const slice = file.slice(offset, offset + chunkSize);
+                        const reader = new FileReader();
+                        
+                        reader.onload = (evt) => {
+                            if (ws.readyState === WebSocket.OPEN && evt.target?.result) {
+                                ws.send(evt.target.result as ArrayBuffer);
+                            }
+                            
+                            offset += chunkSize;
+                            const currentPercent = Math.min(100, Math.floor((offset / file.size) * 100));
+                            if (currentPercent > lastUiUpdate) {
+                                setProgresoUpload(currentPercent);
+                                lastUiUpdate = currentPercent;
+                            }
+
+                            if (offset < file.size) {
+                                setTimeout(readNextChunk, 5);
+                            } else {
+                                enviarComandoSistema("end_file_transfer", {});
+                                setTimeout(() => {
+                                    setSubiendoArchivo(false);
+                                    setProgresoUpload(0);
+                                    setEstado(`C:\\>_ Archivo ${file.name} transferido con éxito.`);
+                                    if (fileInputRef.current) fileInputRef.current.value = "";
+                                    uploadAbortControllerRef.current = null;
+                                    ws.close();
+                                }, 1000);
+                            }
+                        };
+                        reader.readAsArrayBuffer(slice);
+                    };
+
+                    readNextChunk();
+                }, 500);
+            };
+
+            ws.onerror = () => { throw new Error("Fallo en la conexión del túnel."); };
+
+        } catch (err: any) {
+            if (err.message === "ABORT") enviarComandoSistema("cancel_file_transfer"); 
+            else alert(`ERROR DE RED: ${err.message}`);
+            
+            setSubiendoArchivo(false); 
+            setProgresoUpload(0);
+            setEstado("C:\\>_ Error en la transferencia.");
+            if (fileInputRef.current) fileInputRef.current.value = "";
+            uploadAbortControllerRef.current = null;
+        }
+    };
+
+    const cancelarSubida = () => { if (uploadAbortControllerRef.current) uploadAbortControllerRef.current.abort(); };
+
+    const aplicarConfiguracionRed = () => {
+        if (tipoRed === "dhcp") {
+            enviarComandoSistema("config_eth", { mode: "dhcp" });
+        } else {
+            const cleanIp = ipManual.trim();
+            const cleanSubnet = subnetManual.trim();
+            const cleanGw = gwManual.trim();
+            const cleanDns = dnsManual.trim();
+            const cidr = cleanSubnet.split('.').reduce((acc, octet) => {
+                const b = parseInt(octet, 10);
+                if (isNaN(b)) return acc;
+                return acc + (b.toString(2).match(/1/g) || []).length;
+            }, 0);
+            
+            const ipCidr = `${cleanIp}/${cidr}`;
+            enviarComandoSistema("config_eth", { mode: "manual", ip_cidr: ipCidr, gateway: cleanGw, dns: cleanDns }); 
+        }
+        setMostrarModalRed(false);
+    };
+
+    const navegarUrl = () => {
+        if (!urlNavegacion.trim()) return;
+        setEstado(`C:\\>_ Navegando a ${urlNavegacion}...`);
+        enviarComandoSistema("start_kiosk", { url: urlNavegacion });
+    };
+
     return (
         <div className="bg-[#008080] w-screen h-screen flex flex-col font-mono text-black select-none overflow-hidden relative">
             {!autenticado && !esperandoAprobacion && (
@@ -364,7 +597,9 @@ export default function VisorRemoto() {
                             </div>
                             <div className="flex justify-end gap-2 mt-4">
                                 <button type="button" className={win95Button}>Cancelar</button>
-                                <button type="submit" disabled={!agenteOnline || verificando || !email || !sessionUuid} className={win95Button}>Conectar</button>
+                                <button type="submit" disabled={!agenteOnline || verificando || !email || !sessionUuid || esperandoAprobacion} className={win95Button}>
+                                    {esperandoAprobacion ? 'Solicitando...' : 'Conectar'}
+                                </button>
                             </div>
                             <div className="text-center mt-2"><span className="text-[10px] text-gray-700">{estado}</span></div>
                         </div>
@@ -389,9 +624,26 @@ export default function VisorRemoto() {
             {autenticado && (
                 <div className="flex-1 w-full h-full focus:outline-none relative" tabIndex={0}>
                     <div className="absolute top-4 left-4 flex flex-col gap-6">
-                        <div tabIndex={0} className={desktopIcon}><span className="text-4xl">C:\</span><span className="bg-blue-800 px-1">Minicom</span></div>
-                        {deviceType === "heavy" && (<div tabIndex={0} onClick={abrirKiosco} className={desktopIcon}><span className="text-4xl">🌐</span><span className="bg-blue-800 px-1">Web_Nav</span></div>)}
+                        <div tabIndex={0} onClick={abrirMinicom} className={desktopIcon}>
+                            <span className="text-4xl">C:\</span>
+                            <span className="bg-blue-800 px-1">Minicom</span>
+                        </div>
+                        {deviceType === "heavy" && (
+                            <div tabIndex={0} onClick={abrirKiosco} className={desktopIcon}>
+                                <span className="text-4xl">🌐</span>
+                                <span className="bg-blue-800 px-1">Web_Nav</span>
+                            </div>
+                        )}
+                        <div tabIndex={0} onClick={() => fileInputRef.current?.click()} className={desktopIcon}>
+                            <span className="text-4xl">🗂️</span>
+                            <span className="bg-blue-800 px-1">Upload.exe</span>
+                        </div>
+                        <div tabIndex={0} onClick={() => setMostrarModalRed(true)} className={desktopIcon}>
+                            <span className="text-4xl">🔌</span>
+                            <span className="bg-blue-800 px-1">NetConf</span>
+                        </div>
                     </div>
+
                     {vistaActiva !== "desktop" && (
                         <div className="absolute top-8 left-28 right-8 bottom-16 flex flex-col z-10">
                             <div className={`${win95Window} w-full h-full flex flex-col shadow-[4px_4px_0_#000]`}>
@@ -399,8 +651,47 @@ export default function VisorRemoto() {
                                     <div className="flex items-center gap-2"><span>🌐 SRA Gráfico</span></div>
                                     <button onClick={volverAlEscritorio} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
                                 </div>
-                                <div className={`flex-1 m-1 border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white overflow-hidden bg-black relative`}>
-                                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain cursor-crosshair" />
+                                <div className={`flex-1 m-1 border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white overflow-hidden bg-black flex flex-col relative`}>
+                                    
+                                    {vistaActiva === "video" && (
+                                        <div className="bg-[#c0c0c0] p-1 flex items-center gap-2 border-b-2 border-black w-full shrink-0">
+                                            <span className="text-xs font-bold pl-1 text-black">Dirección:</span>
+                                            <input 
+                                                type="text" 
+                                                value={urlNavegacion} 
+                                                onChange={(e) => setUrlNavegacion(e.target.value)}
+                                                onKeyDown={(e) => {
+                                                    e.stopPropagation(); 
+                                                    if (e.key === 'Enter') navegarUrl();
+                                                }}
+                                                onFocus={(e) => e.target.select()}
+                                                className={`${win95Input} flex-1 text-black font-sans`}
+                                                placeholder="http://192.168.1.1"
+                                            />
+                                            <button onClick={navegarUrl} className={`${win95Button} py-0 h-6 leading-none`}>Ir</button>
+                                        </div>
+                                    )}
+
+                                    {vistaActiva === "video" && (
+                                        <video 
+                                            ref={videoRef} 
+                                            autoPlay 
+                                            playsInline 
+                                            muted 
+                                            onMouseMove={manejarMouseMove} 
+                                            onMouseDown={manejarMouseDown} 
+                                            onMouseUp={manejarMouseUp} 
+                                            onWheel={manejarScroll} 
+                                            onContextMenu={(e) => e.preventDefault()} 
+                                            className="w-full flex-1 object-contain cursor-crosshair focus:outline-none" 
+                                            tabIndex={0}
+                                        />
+                                    )}
+                                    {vistaActiva === "terminal" && (
+                                        <div className="w-full h-full text-green-400 p-1">
+                                            <TerminalLite uuid={sessionUuid} backendHost={backendHost} token={token || ""} />
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="bg-[#c0c0c0] flex justify-between text-[10px] px-2 py-0.5 border-t border-white">
                                     <span>Estado: {estado}</span><span>FPS: {fps}</span>
@@ -408,6 +699,77 @@ export default function VisorRemoto() {
                             </div>
                         </div>
                     )}
+
+                    {agenteDesconectadoError && (
+                        <div className="absolute inset-0 flex items-center justify-center z-[9999] bg-black/50">
+                            <div className={`${win95Window} w-[380px] shadow-[4px_4px_0_#000]`}>
+                                <div className={win95Title}>
+                                    <span>Error de Comunicación Fatal</span>
+                                    <button onClick={cerrarPopupYExpulsar} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
+                                </div>
+                                <div className="p-4 flex flex-col gap-4 bg-[#c0c0c0]">
+                                    <div className="flex gap-4 items-center">
+                                        <span className="text-4xl select-none">❌</span>
+                                        <p className="text-sm font-bold">El agente remoto ha perdido la señal P2P o el equipo se ha desconectado de la red.</p>
+                                    </div>
+                                    <div className="flex justify-end mt-2">
+                                        <button onClick={cerrarPopupYExpulsar} className={win95Button}>Aceptar</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {subiendoArchivo && (
+                        <div className="absolute inset-0 flex items-center justify-center z-50">
+                            <div className={`${win95Window} w-80 shadow-[4px_4px_0_#000]`}>
+                                <div className={win95Title}><span>Copiando...</span></div>
+                                <div className="p-4 flex flex-col gap-4">
+                                    <div className={win95Panel}><div className="bg-[#0000A0] h-4" style={{ width: `${progresoUpload}%` }}></div></div>
+                                    <p className="text-center text-xs">{progresoUpload}% Completado</p>
+                                    <button onClick={cancelarSubida} className={win95Button}>Cancelar</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={manejarSubidaArchivo}/>
+
+                    {mostrarModalRed && (
+                        <div className="absolute inset-0 flex items-center justify-center z-[60]">
+                            <div className={`${win95Window} w-[420px] shadow-[4px_4px_0_#000]`}>
+                                <div className={win95Title}>
+                                    <span>Propiedades TCP/IP (eth0)</span>
+                                    <button onClick={() => setMostrarModalRed(false)} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
+                                </div>
+                                <div className="p-4 flex flex-col gap-3 bg-[#c0c0c0]">
+                                    <div className="flex flex-col gap-1 border border-[#808080] p-2 bg-white/50">
+                                        <label className="text-xs font-bold mb-1">Configuración IP:</label>
+                                        <div className="flex items-center gap-2">
+                                            <input type="radio" id="dhcp" name="tipoRed" checked={tipoRed === "dhcp"} onChange={() => setTipoRed("dhcp")} />
+                                            <label htmlFor="dhcp" className="text-xs cursor-pointer">DHCP Automático</label>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <input type="radio" id="manual" name="tipoRed" checked={tipoRed === "manual"} onChange={() => setTipoRed("manual")} />
+                                            <label htmlFor="manual" className="text-xs cursor-pointer">IP Estática</label>
+                                        </div>
+                                    </div>
+                                    {tipoRed === "manual" && (
+                                        <div className="flex flex-col gap-2 border border-[#808080] p-2 bg-white/50">
+                                            <div className="flex items-center justify-between"><span className="text-xs">IP:</span><input type="text" value={ipManual} onChange={(e) => setIpManual(e.target.value)} className={`${win95Input} w-52`} /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">Subred:</span><input type="text" value={subnetManual} onChange={(e) => setSubnetManual(e.target.value)} className={`${win95Input} w-52`} /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">Gateway:</span><input type="text" value={gwManual} onChange={(e) => setGwManual(e.target.value)} className={`${win95Input} w-52`} /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">DNS:</span><input type="text" value={dnsManual} onChange={(e) => setDnsManual(e.target.value)} className={`${win95Input} w-52`} placeholder="8.8.8.8" /></div>
+                                        </div>
+                                    )}
+                                    <div className="flex justify-end gap-2 mt-2">
+                                        <button onClick={aplicarConfiguracionRed} className={win95Button}>Aceptar</button>
+                                        <button onClick={() => setMostrarModalRed(false)} className={win95Button}>Cancelar</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     <div className="absolute bottom-0 left-0 w-full h-8 bg-[#c0c0c0] border-t-2 border-white border-b-2 border-b-black flex items-center justify-between px-1 z-50 shadow-[0_-1px_2px_rgba(0,0,0,0.2)]">
                         <button className="bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-[#808080] border-r-[#808080] text-black px-2 h-6 flex items-center gap-1 font-bold text-xs"><span className="text-red-500">❖</span> SRA</button>
                         <div className="flex items-center gap-2 h-full">
