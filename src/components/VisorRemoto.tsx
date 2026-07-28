@@ -3,6 +3,7 @@ import TerminalLite from './TerminalLite.tsx';
 
 interface CoordenadasRelativas { x: number; y: number; w: number; h: number; }
 type VistaApp = "desktop" | "video" | "terminal";
+type TftpFase = "inactiva" | "staging" | "transfiriendo";
 
 const win95Window = "bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black";
 const win95Title = "bg-[#0000A0] text-white font-bold px-2 py-0.5 flex justify-between items-center text-sm select-none";
@@ -16,15 +17,14 @@ export default function VisorRemoto() {
     const wsRef = useRef<WebSocket | null>(null);
     const peerRef = useRef<RTCPeerConnection | null>(null);
     const dataChannelRef = useRef<RTCDataChannel | null>(null);
-    const fileInputRef = useRef<HTMLInputElement | null>(null);
-
+    
     const iceQueueRef = useRef<RTCIceCandidateInit[]>([]);
     const isSdpProcessingRef = useRef<boolean>(false);
     const streamRef = useRef<MediaStream | null>(null);
     
     const cierreSesionVoluntarioRef = useRef<boolean>(false);
     const fallosConsecutivos = useRef<number>(0);
-    const audioCtxRef = useRef<AudioContext | any>(null);
+    const audioCtxRef = useRef<any>(null);
 
     const [autenticado, setAutenticado] = useState<boolean>(false);
     const [token, setToken] = useState<string | null>(null);
@@ -33,19 +33,30 @@ export default function VisorRemoto() {
     const [agenteOnline, setAgenteOnline] = useState<boolean | null>(null);
     const [verificando, setVerificando] = useState<boolean>(false);
     
-    const [deviceType, setDeviceType] = useState<"heavy" | "lite">("heavy");
+    const [deviceType, setDeviceType] = useState<string>("heavy");
     const [esperandoAprobacion, setEsperandoAprobacion] = useState<boolean>(false);
     
-    const [subiendoArchivo, setSubiendoArchivo] = useState<boolean>(false);
-    const [progresoUpload, setProgresoUpload] = useState<number>(0);
-    const uploadAbortControllerRef = useRef<AbortController | null>(null);
-    
+    // Estados de Red
     const [mostrarModalRed, setMostrarModalRed] = useState<boolean>(false);
-    const [tipoRed, setTipoRed] = useState<"dhcp" | "manual">("dhcp");
+    const [modoNetConf, setModoNetConf] = useState<string>("web"); 
+    const [tipoRed, setTipoRed] = useState<string>("dhcp");
     const [ipManual, setIpManual] = useState<string>("");
     const [subnetManual, setSubnetManual] = useState<string>("255.255.255.0");
     const [gwManual, setGwManual] = useState<string>("");
     const [dnsManual, setDnsManual] = useState<string>(""); 
+    
+    const [tftpConfigured, setTftpConfigured] = useState<boolean>(false);
+
+    // Estados de Subida TFTP
+    const [mostrarModalUpload, setMostrarModalUpload] = useState<boolean>(false);
+    const [uploadOs, setUploadOs] = useState<string>("cisco");
+    const [subiendoArchivo, setSubiendoArchivo] = useState<boolean>(false);
+    const [progresoUpload, setProgresoUpload] = useState<number>(0);
+    const uploadAbortControllerRef = useRef<AbortController | null>(null);
+
+    // Fases del TFTP
+    const [tftpFase, setTftpFase] = useState<TftpFase>("inactiva");
+    const [tftpStagingFile, setTftpStagingFile] = useState<string | null>(null);
 
     const [urlNavegacion, setUrlNavegacion] = useState<string>("http://192.168.1.1");
     const [agenteDesconectadoError, setAgenteDesconectadoError] = useState<boolean>(false);
@@ -66,11 +77,12 @@ export default function VisorRemoto() {
     const initAudio = () => {
         try {
             if (!audioCtxRef.current) {
-                const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-                const ctx = new AudioContext();
+                const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+                const ctx = new AudioContextClass();
                 audioCtxRef.current = ctx;
             }
             const ctx = audioCtxRef.current;
+            if (!ctx) return;
             if (ctx.state === 'suspended') ctx.resume();
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
@@ -175,6 +187,7 @@ export default function VisorRemoto() {
         if (agenteDesconectadoError && audioCtxRef.current) {
             try {
                 const ctx = audioCtxRef.current;
+                if (!ctx) return;
                 if (ctx.state === 'suspended') ctx.resume();
                 const freqs = [392.00, 493.88, 587.33];
                 freqs.forEach(f => {
@@ -203,6 +216,35 @@ export default function VisorRemoto() {
             });
         } catch (e) { console.error("SYS_ERR:", e); }
     }, [backendHost, sessionUuid]);
+
+    // 🔥 INTERCEPTOR INFALIBLE: Si el usuario recarga la página (F5) o cierra la pestaña 🔥
+    useEffect(() => {
+        const handleUnload = () => {
+            if (autenticado && backendHost && sessionUuid) {
+                // 1. Petición POST vacía SIN Body: Evita el bloqueo de CORS Preflight en F5
+                // Esto borra el operator_req de Redis de forma instantánea.
+                fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { 
+                    method: 'POST', 
+                    keepalive: true 
+                }).catch(() => {});
+                
+                // 2. Disparo de emergencia al agente
+                fetch(`https://${backendHost}/api/remote/lite/command/${sessionUuid}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: "logout", params: {} }),
+                    keepalive: true
+                }).catch(() => {});
+            }
+        };
+
+        window.addEventListener('beforeunload', handleUnload);
+        window.addEventListener('unload', handleUnload);
+        return () => {
+            window.removeEventListener('beforeunload', handleUnload);
+            window.removeEventListener('unload', handleUnload);
+        };
+    }, [autenticado, backendHost, sessionUuid]);
 
     const enviarComando = useCallback((comando: any) => {
         const payload = JSON.stringify(comando);
@@ -338,7 +380,7 @@ export default function VisorRemoto() {
 
             ws.onclose = () => { console.log("ℹ️ [SEÑALIZACIÓN] Socket cerrado."); };
 
-            ws.onmessage = async (event) => {
+            ws.onmessage = async (event: MessageEvent) => {
                 const msg = JSON.parse(event.data);
                 if (msg.type_ === 'ready') {
                     iceQueueRef.current = [];
@@ -365,14 +407,14 @@ export default function VisorRemoto() {
                         }
                     };
 
-                    pc.onicecandidate = (e) => { if (e.candidate && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ ice: e.candidate })); } };
+                    pc.onicecandidate = (e: RTCPeerConnectionIceEvent) => { if (e.candidate && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ ice: e.candidate })); } };
                     pc.addTransceiver('video', { direction: 'recvonly' });
                     
                     const dc = pc.createDataChannel("control");
                     dc.onopen = () => console.log("✅ [DATOS] Canal asegurado.");
                     dataChannelRef.current = dc;
 
-                    pc.ontrack = (e) => {
+                    pc.ontrack = (e: RTCTrackEvent) => {
                         const stream = e.streams && e.streams.length > 0 ? e.streams[0] : new MediaStream([e.track]);
                         streamRef.current = stream;
                         if (videoRef.current) {
@@ -430,9 +472,15 @@ export default function VisorRemoto() {
 
     const volverAlEscritorio = () => {
         enviarComandoSistema("stop_kiosk"); 
+        
+        if (peerRef.current) { peerRef.current.close(); peerRef.current = null; }
+        if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+        if (dataChannelRef.current) { dataChannelRef.current.close(); dataChannelRef.current = null; }
+        if (animationFrameIdRef.current) { cancelAnimationFrame(animationFrameIdRef.current); animationFrameIdRef.current = null; }
         if (videoRef.current) { videoRef.current.srcObject = null; }
+        
         setVistaActiva("desktop");
-        setEstado("C:\\>_ Kiosco cerrado. SRA-Operator hibernando en segundo plano.");
+        setEstado("C:\\>_ Kiosco y túnel de vídeo cerrados. CPU liberada.");
         setFps(0);
     };
     
@@ -441,10 +489,25 @@ export default function VisorRemoto() {
         cerrarSesion();
     };
 
-    const cerrarSesion = useCallback(() => {
-        enviarComandoSistema("logout"); 
+    // 🔥 BOTÓN CERRAR SESIÓN ROBUSTO CON ASYNC/AWAIT
+    const cerrarSesion = useCallback(async () => {
+        setEstado("C:\\>_ Liberando hardware de red...");
         
-        fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { method: 'POST' }).catch(() => {});
+        if (tftpStagingFile) {
+            await enviarComandoSistema("delete_tftp_file", { filename: tftpStagingFile });
+        }
+
+        await enviarComandoSistema("logout"); 
+        
+        try {
+            // Hacemos un POST vacío. Sin JSON, directo al backend
+            await fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { 
+                method: 'POST',
+                keepalive: true
+            });
+        } catch (e) {
+            console.warn("La liberación forzada falló.");
+        }
         
         cierreSesionVoluntarioRef.current = true;
         if (uploadAbortControllerRef.current) { uploadAbortControllerRef.current.abort(); uploadAbortControllerRef.current = null; }
@@ -452,16 +515,24 @@ export default function VisorRemoto() {
         if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         if (dataChannelRef.current) { dataChannelRef.current.close(); dataChannelRef.current = null; }
         if (animationFrameIdRef.current) { cancelAnimationFrame(animationFrameIdRef.current); animationFrameIdRef.current = null; }
+        if (videoRef.current) { videoRef.current.srcObject = null; }
         
         setFps(0);
         setEstado("C:\\>_ Desconectado.");
         setAutenticado(false);
         setToken(null);
         setVistaActiva("desktop");
-    }, [enviarComandoSistema, backendHost, sessionUuid]);
+    }, [enviarComandoSistema, backendHost, sessionUuid, tftpStagingFile]);
 
-    // 🔥 PUNTO 1 RESUELTO: Empieza a enviar en cuanto el WS abre, sin esperar un texto.
-    const manejarSubidaArchivo = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const abrirMenuUpload = () => {
+        if (!tftpConfigured) {
+            setEstado("C:\\>_ [BLOQUEO] Debes configurar la IP de TFTP en NetConf primero.");
+            return;
+        }
+        setMostrarModalUpload(true);
+    };
+
+    const manejarSubidaYMacro = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
 
@@ -469,17 +540,16 @@ export default function VisorRemoto() {
         const signal = uploadAbortControllerRef.current.signal;
         setSubiendoArchivo(true);
         setProgresoUpload(0);
-        setEstado(`C:\\>_ Conectando túnel para ${file.name}...`);
+        setEstado(`C:\\>_ Preparando túnel TFTP para ${file.name}...`);
 
         try {
             const wsUrl = `wss://${backendHost}/api/remote/lite/web/${sessionUuid}?token=${token || ""}`;
             const ws = new WebSocket(wsUrl);
 
             ws.onopen = async () => {
-                setEstado(`C:\\>_ Túnel listo. Preparando archivo...`);
+                setEstado(`C:\\>_ Túnel activo. Subiendo archivo al TFTP Local...`);
                 await enviarComandoSistema("start_file_transfer", { filename: file.name, size: file.size });
 
-                // Damos 500ms al servidor Rust para que procese el JSON y abra el archivo en disco
                 setTimeout(() => {
                     const chunkSize = 64 * 1024;
                     let offset = 0;
@@ -493,7 +563,7 @@ export default function VisorRemoto() {
                         const slice = file.slice(offset, offset + chunkSize);
                         const reader = new FileReader();
                         
-                        reader.onload = (evt) => {
+                        reader.onload = (evt: ProgressEvent<FileReader>) => {
                             if (ws.readyState === WebSocket.OPEN && evt.target?.result) {
                                 ws.send(evt.target.result as ArrayBuffer);
                             }
@@ -509,14 +579,15 @@ export default function VisorRemoto() {
                                 setTimeout(readNextChunk, 5);
                             } else {
                                 enviarComandoSistema("end_file_transfer", {});
-                                setTimeout(() => {
-                                    setSubiendoArchivo(false);
-                                    setProgresoUpload(0);
-                                    setEstado(`C:\\>_ Archivo ${file.name} transferido con éxito.`);
-                                    if (fileInputRef.current) fileInputRef.current.value = "";
-                                    uploadAbortControllerRef.current = null;
-                                    ws.close();
-                                }, 1000);
+                                setEstado(`C:\\>_ Archivo en Raspberry. Iniciando TFTP hacia el router...`);
+                                
+                                enviarComandoSistema("macro_tftp_download", { filename: file.name, os: uploadOs, raspi_ip: ipManual || "192.168.1.135" });
+                                
+                                setTftpStagingFile(file.name);
+                                setTftpFase("transfiriendo");
+                                setSubiendoArchivo(false);
+                                uploadAbortControllerRef.current = null;
+                                ws.close();
                             }
                         };
                         reader.readAsArrayBuffer(slice);
@@ -535,7 +606,6 @@ export default function VisorRemoto() {
             setSubiendoArchivo(false); 
             setProgresoUpload(0);
             setEstado("C:\\>_ Error en la transferencia.");
-            if (fileInputRef.current) fileInputRef.current.value = "";
             uploadAbortControllerRef.current = null;
         }
     };
@@ -550,7 +620,7 @@ export default function VisorRemoto() {
             const cleanSubnet = subnetManual.trim();
             const cleanGw = gwManual.trim();
             const cleanDns = dnsManual.trim();
-            const cidr = cleanSubnet.split('.').reduce((acc, octet) => {
+            const cidr = cleanSubnet.split('.').reduce((acc: number, octet: string) => {
                 const b = parseInt(octet, 10);
                 if (isNaN(b)) return acc;
                 return acc + (b.toString(2).match(/1/g) || []).length;
@@ -559,7 +629,26 @@ export default function VisorRemoto() {
             const ipCidr = `${cleanIp}/${cidr}`;
             enviarComandoSistema("config_eth", { mode: "manual", ip_cidr: ipCidr, gateway: cleanGw, dns: cleanDns }); 
         }
+
+        if (modoNetConf === "tftp") {
+            setTftpConfigured(true);
+            enviarComandoSistema("config_tftp", {}); 
+        } else {
+            setTftpConfigured(false);
+        }
+
+        setEstado(`C:\\>_ Configuración aplicada en modo: ${modoNetConf.toUpperCase()}`);
         setMostrarModalRed(false);
+    };
+
+    const finalizarYLimpiarTFTP = () => {
+        if (tftpStagingFile) {
+            enviarComandoSistema("delete_tftp_file", { filename: tftpStagingFile });
+            setTftpStagingFile(null);
+        }
+        setTftpFase("inactiva");
+        setMostrarModalUpload(false);
+        setEstado(`C:\\>_ Transferencia completada y archivo vaporizado de forma segura.`);
     };
 
     const navegarUrl = () => {
@@ -634,10 +723,15 @@ export default function VisorRemoto() {
                                 <span className="bg-blue-800 px-1">Web_Nav</span>
                             </div>
                         )}
-                        <div tabIndex={0} onClick={() => fileInputRef.current?.click()} className={desktopIcon}>
+                        <div 
+                            tabIndex={tftpConfigured ? 0 : -1} 
+                            onClick={tftpConfigured ? abrirMenuUpload : () => setEstado("C:\\>_ [BLOQUEO] Configura primero la IP TFTP en NetConf.")} 
+                            className={`flex flex-col items-center justify-start gap-1 p-2 w-20 text-white text-xs text-center border border-transparent select-none ${tftpConfigured ? 'cursor-pointer hover:border-white/50 focus:bg-[#0000A0] focus:border-[#0000A0] focus:outline-dotted focus:outline-1 focus:outline-yellow-400' : 'opacity-40 grayscale cursor-not-allowed'}`}
+                        >
                             <span className="text-4xl">🗂️</span>
                             <span className="bg-blue-800 px-1">Upload.exe</span>
                         </div>
+
                         <div tabIndex={0} onClick={() => setMostrarModalRed(true)} className={desktopIcon}>
                             <span className="text-4xl">🔌</span>
                             <span className="bg-blue-800 px-1">NetConf</span>
@@ -720,19 +814,89 @@ export default function VisorRemoto() {
                         </div>
                     )}
 
-                    {subiendoArchivo && (
-                        <div className="absolute inset-0 flex items-center justify-center z-50">
-                            <div className={`${win95Window} w-80 shadow-[4px_4px_0_#000]`}>
-                                <div className={win95Title}><span>Copiando...</span></div>
-                                <div className="p-4 flex flex-col gap-4">
-                                    <div className={win95Panel}><div className="bg-[#0000A0] h-4" style={{ width: `${progresoUpload}%` }}></div></div>
-                                    <p className="text-center text-xs">{progresoUpload}% Completado</p>
-                                    <button onClick={cancelarSubida} className={win95Button}>Cancelar</button>
+                    {mostrarModalUpload && (
+                        <div className="absolute inset-0 flex items-center justify-center z-[60] bg-black/50">
+                            <div className={`${win95Window} w-[420px] shadow-[4px_4px_0_#000]`}>
+                                <div className={win95Title}>
+                                    <span>Aprovisionamiento TFTP Zero-Touch</span>
+                                    {tftpFase === "inactiva" && (
+                                        <button onClick={() => setMostrarModalUpload(false)} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
+                                    )}
+                                </div>
+                                
+                                <div className="p-4 flex flex-col gap-4 bg-[#c0c0c0]">
+                                    {tftpFase === "inactiva" && (
+                                        <>
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-xs font-bold">Sistema Operativo Destino:</label>
+                                                <select 
+                                                    value={uploadOs} 
+                                                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setUploadOs(e.target.value)} 
+                                                    className={`${win95Input} w-full`}
+                                                >
+                                                    <option value="cisco">Cisco (copy tftp...)</option>
+                                                    <option value="fortinet">Fortinet (execute restore...)</option>
+                                                    <option value="paloalto">PaloAlto (tftp import...)</option>
+                                                </select>
+                                            </div>
+                                            
+                                            <div className="border border-[#808080] p-3 bg-white/50 text-center">
+                                                <label className={`${win95Button} block cursor-pointer`}>
+                                                    SELECCIONAR ARCHIVO Y AUTO-INYECTAR
+                                                    <input 
+                                                        type="file" 
+                                                        className="hidden" 
+                                                        onChange={manejarSubidaYMacro}
+                                                    />
+                                                </label>
+                                            </div>
+                                            <p className="text-[10px] text-gray-700 italic">
+                                                Al seleccionar, el archivo se transferirá e inyectará automáticamente en el router.
+                                            </p>
+                                        </>
+                                    )}
+
+                                    {tftpFase === "transfiriendo" && (
+                                        <div className="border-2 border-blue-600 bg-[#e6f0ff] p-3 flex flex-col gap-3">
+                                            <div>
+                                                <h3 className="text-blue-800 font-mono text-xs font-bold flex items-center gap-2">
+                                                    <span className="animate-spin">🔄</span> TFTP ABIERTO Y TRANSMITIENDO
+                                                </h3>
+                                                <p className="text-black font-mono text-[11px] mt-2">
+                                                    Macro inyectado. El archivo <b className="text-blue-800">{tftpStagingFile}</b> está siendo servido.<br/><br/>
+                                                    <span className="bg-blue-200 p-1 border border-blue-400 font-bold block">
+                                                        👉 Verifica el progreso en el terminal Minicom. 
+                                                        Cuando termine, pulsa el botón inferior para borrar el rastro.
+                                                    </span>
+                                                </p>
+                                            </div>
+                                            <div className="mt-2">
+                                                <button 
+                                                    onClick={finalizarYLimpiarTFTP}
+                                                    className="w-full bg-blue-600 hover:bg-blue-500 text-white border-2 border-t-[#80b3ff] border-l-[#80b3ff] border-b-black border-r-black px-4 py-3 font-mono text-xs font-bold shadow-[0_0_10px_rgba(37,99,235,0.4)]"
+                                                >
+                                                    ✅ DESCARGA COMPLETADA: LIMPIAR Y CERRAR
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         </div>
                     )}
-                    <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={manejarSubidaArchivo}/>
+
+                    {subiendoArchivo && (
+                        <div className="absolute inset-0 flex items-center justify-center z-[70]">
+                            <div className={`${win95Window} w-80 shadow-[4px_4px_0_#000]`}>
+                                <div className={win95Title}><span>Cargando al servidor SRA...</span></div>
+                                <div className="p-4 flex flex-col gap-4">
+                                    <div className={win95Panel}><div className="bg-[#0000A0] h-4" style={{ width: `${progresoUpload}%` }}></div></div>
+                                    <p className="text-center text-xs">{progresoUpload}% Completado</p>
+                                    <button onClick={cancelarSubida} className={win95Button}>Abortar</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {mostrarModalRed && (
                         <div className="absolute inset-0 flex items-center justify-center z-[60]">
@@ -742,6 +906,19 @@ export default function VisorRemoto() {
                                     <button onClick={() => setMostrarModalRed(false)} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
                                 </div>
                                 <div className="p-4 flex flex-col gap-3 bg-[#c0c0c0]">
+                                    
+                                    <div className="flex flex-col gap-1 border border-[#808080] p-2 bg-white/50">
+                                        <label className="text-xs font-bold mb-1">Propósito de la configuración:</label>
+                                        <select 
+                                            value={modoNetConf} 
+                                            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setModoNetConf(e.target.value)} 
+                                            className={win95Input}
+                                        >
+                                            <option value="web">IP para Web config</option>
+                                            <option value="tftp">IP para Transferencia TFTP</option>
+                                        </select>
+                                    </div>
+
                                     <div className="flex flex-col gap-1 border border-[#808080] p-2 bg-white/50">
                                         <label className="text-xs font-bold mb-1">Configuración IP:</label>
                                         <div className="flex items-center gap-2">
@@ -755,10 +932,10 @@ export default function VisorRemoto() {
                                     </div>
                                     {tipoRed === "manual" && (
                                         <div className="flex flex-col gap-2 border border-[#808080] p-2 bg-white/50">
-                                            <div className="flex items-center justify-between"><span className="text-xs">IP:</span><input type="text" value={ipManual} onChange={(e) => setIpManual(e.target.value)} className={`${win95Input} w-52`} /></div>
-                                            <div className="flex items-center justify-between"><span className="text-xs">Subred:</span><input type="text" value={subnetManual} onChange={(e) => setSubnetManual(e.target.value)} className={`${win95Input} w-52`} /></div>
-                                            <div className="flex items-center justify-between"><span className="text-xs">Gateway:</span><input type="text" value={gwManual} onChange={(e) => setGwManual(e.target.value)} className={`${win95Input} w-52`} /></div>
-                                            <div className="flex items-center justify-between"><span className="text-xs">DNS:</span><input type="text" value={dnsManual} onChange={(e) => setDnsManual(e.target.value)} className={`${win95Input} w-52`} placeholder="8.8.8.8" /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">IP:</span><input type="text" value={ipManual} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setIpManual(e.target.value)} className={`${win95Input} w-52`} /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">Subred:</span><input type="text" value={subnetManual} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSubnetManual(e.target.value)} className={`${win95Input} w-52`} /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">Gateway:</span><input type="text" value={gwManual} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setGwManual(e.target.value)} className={`${win95Input} w-52`} /></div>
+                                            <div className="flex items-center justify-between"><span className="text-xs">DNS:</span><input type="text" value={dnsManual} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDnsManual(e.target.value)} className={`${win95Input} w-52`} placeholder="8.8.8.8" /></div>
                                         </div>
                                     )}
                                     <div className="flex justify-end gap-2 mt-2">
