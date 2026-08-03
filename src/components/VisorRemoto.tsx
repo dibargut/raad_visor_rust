@@ -8,7 +8,7 @@ type TftpFase = "inactiva" | "staging" | "transfiriendo";
 const win95Window = "bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black";
 const win95Title = "bg-[#0000A0] text-white font-bold px-2 py-0.5 flex justify-between items-center text-sm select-none";
 const win95Button = "bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black active:border-t-black active:border-l-black active:border-b-white active:border-r-white text-black px-4 py-1 text-xs font-bold cursor-pointer outline-none focus:outline-dotted focus:outline-1 focus:outline-black focus:-outline-offset-4 disabled:opacity-50";
-const win95Input = "bg-white border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white px-2 py-1 text-black text-xs outline-none focus:bg-[#0000A0] focus:text-white";
+const win95Input = "bg-white border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white px-2 py-1 text-black text-xs outline-none focus:bg-[#0000A0] focus:text-white uppercase tracking-widest text-center";
 const desktopIcon = "flex flex-col items-center justify-start gap-1 p-2 w-20 text-white text-xs text-center cursor-pointer border border-transparent hover:border-white/50 focus:bg-[#0000A0] focus:border-[#0000A0] focus:outline-dotted focus:outline-1 focus:outline-yellow-400 select-none";
 const win95Panel = "bg-[#c0c0c0] border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white";
 
@@ -28,7 +28,7 @@ export default function VisorRemoto() {
 
     const [autenticado, setAutenticado] = useState<boolean>(false);
     const [token, setToken] = useState<string | null>(null);
-    const [estado, setEstado] = useState<string>("C:\\>_ Esperando...");
+    const [estado, setEstado] = useState<string>("C:\\>_ Esperando datos de acceso...");
     const [fps, setFps] = useState<number>(0);
     const [agenteOnline, setAgenteOnline] = useState<boolean | null>(null);
     const [verificando, setVerificando] = useState<boolean>(false);
@@ -36,7 +36,6 @@ export default function VisorRemoto() {
     const [deviceType, setDeviceType] = useState<string>("heavy");
     const [esperandoAprobacion, setEsperandoAprobacion] = useState<boolean>(false);
     
-    // Estados de Red
     const [mostrarModalRed, setMostrarModalRed] = useState<boolean>(false);
     const [modoNetConf, setModoNetConf] = useState<string>("web"); 
     const [tipoRed, setTipoRed] = useState<string>("dhcp");
@@ -47,14 +46,12 @@ export default function VisorRemoto() {
     
     const [tftpConfigured, setTftpConfigured] = useState<boolean>(false);
 
-    // Estados de Subida TFTP
     const [mostrarModalUpload, setMostrarModalUpload] = useState<boolean>(false);
     const [uploadOs, setUploadOs] = useState<string>("cisco");
     const [subiendoArchivo, setSubiendoArchivo] = useState<boolean>(false);
     const [progresoUpload, setProgresoUpload] = useState<number>(0);
     const uploadAbortControllerRef = useRef<AbortController | null>(null);
 
-    // Fases del TFTP
     const [tftpFase, setTftpFase] = useState<TftpFase>("inactiva");
     const [tftpStagingFile, setTftpStagingFile] = useState<string | null>(null);
 
@@ -63,12 +60,11 @@ export default function VisorRemoto() {
 
     const [backendHost, setBackendHost] = useState<string>("192.168.1.135:8080");
     const [sessionUuid, setSessionUuid] = useState<string>("88a29ec48f03"); 
+    const [visorPin, setVisorPin] = useState<string>(""); 
     const [email, setEmail] = useState<string>(""); 
 
     const [vistaActiva, setVistaActiva] = useState<VistaApp>("desktop");
     const [hora, setHora] = useState<string>("");
-
-    const PASSWORD_SECRETA = "TuContrasenaSeguraAqui";
 
     const lastMouseMove = useRef<number>(0);
     const frameCountRef = useRef<number>(0);
@@ -91,7 +87,7 @@ export default function VisorRemoto() {
             gain.connect(ctx.destination);
             osc.start(ctx.currentTime);
             osc.stop(ctx.currentTime + 0.001);
-        } catch (e) { console.error("No se pudo precalentar el audio:", e); }
+        } catch (e) { console.error("No pre-audio:", e); }
     };
 
     useEffect(() => {
@@ -102,14 +98,14 @@ export default function VisorRemoto() {
         return () => clearInterval(interval);
     }, []);
 
+    // 🔥 PING PÚBLICO: Obtiene el status online sin necesidad de enviar Token/PIN
     const verificarEstadoAgente = useCallback(async () => {
         if (!backendHost || !sessionUuid) { setAgenteOnline(false); return; }
         setVerificando(true);
         try {
-            const resApp = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`);
+            const resApp = await fetch(`https://${backendHost}/api/app/ping/${sessionUuid}`);
             if (resApp.ok) {
                 const dataApp = await resApp.json();
-                setDeviceType(dataApp.device_type || "heavy");
                 setAgenteOnline(Boolean(dataApp.is_online));
             } else {
                 setAgenteOnline(false);
@@ -123,11 +119,13 @@ export default function VisorRemoto() {
     useEffect(() => { verificarEstadoAgente(); }, [verificarEstadoAgente]);
 
     useEffect(() => {
-        if (!esperandoAprobacion) return;
+        if (!esperandoAprobacion || !token) return;
 
         const intervalId = setInterval(async () => {
             try {
-                const res = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`);
+                const res = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
                 if (res.ok) {
                     const data = await res.json();
                     if (data.mfa_authorized) {
@@ -136,17 +134,18 @@ export default function VisorRemoto() {
                         setAutenticado(true);
                     } else if (String(data.operator_requested) === "false" || !data.operator_requested) {
                         setEsperandoAprobacion(false);
-                        setEstado("ACCESO DENEGADO por el SRA Admin Center.");
+                        setEstado("ACCESO DENEGADO por el administrador.");
+                        setToken(null);
                     }
                 }
             } catch (e) { console.error(e); }
         }, 2000);
 
         return () => clearInterval(intervalId);
-    }, [esperandoAprobacion, backendHost, sessionUuid]);
+    }, [esperandoAprobacion, backendHost, sessionUuid, token]);
 
     useEffect(() => {
-        if (!autenticado) return;
+        if (!autenticado || !token) return;
         
         let gracePeriod = true;
         setTimeout(() => { gracePeriod = false; }, 8000);
@@ -155,14 +154,14 @@ export default function VisorRemoto() {
             if (cierreSesionVoluntarioRef.current) return;
 
             try {
-                const res = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`);
+                const res = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
                 if (res.ok) {
                     const data = await res.json();
                     if (!data.is_online && !gracePeriod) {
                         fallosConsecutivos.current += 1;
-                        if (fallosConsecutivos.current >= 3) {
-                            setAgenteDesconectadoError(true);
-                        }
+                        if (fallosConsecutivos.current >= 3) setAgenteDesconectadoError(true);
                     } else {
                         fallosConsecutivos.current = 0;
                     }
@@ -181,7 +180,7 @@ export default function VisorRemoto() {
         }, 2000);
         
         return () => clearInterval(intervalId);
-    }, [autenticado, backendHost, sessionUuid]);
+    }, [autenticado, backendHost, sessionUuid, token]);
 
     useEffect(() => {
         if (agenteDesconectadoError && audioCtxRef.current) {
@@ -208,30 +207,31 @@ export default function VisorRemoto() {
     }, [agenteDesconectadoError]);
 
     const enviarComandoSistema = useCallback(async (action: string, params: any = {}) => {
+        if (!token) return;
         try {
             await fetch(`https://${backendHost}/api/remote/lite/command/${sessionUuid}`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
                 body: JSON.stringify({ action, params })
             });
         } catch (e) { console.error("SYS_ERR:", e); }
-    }, [backendHost, sessionUuid]);
+    }, [backendHost, sessionUuid, token]);
 
-    // 🔥 INTERCEPTOR INFALIBLE: Si el usuario recarga la página (F5) o cierra la pestaña 🔥
     useEffect(() => {
         const handleUnload = () => {
-            if (autenticado && backendHost && sessionUuid) {
-                // 1. Petición POST vacía SIN Body: Evita el bloqueo de CORS Preflight en F5
-                // Esto borra el operator_req de Redis de forma instantánea.
+            if (autenticado && backendHost && sessionUuid && token) {
                 fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { 
                     method: 'POST', 
+                    headers: { 'Authorization': `Bearer ${token}` },
                     keepalive: true 
                 }).catch(() => {});
                 
-                // 2. Disparo de emergencia al agente
                 fetch(`https://${backendHost}/api/remote/lite/command/${sessionUuid}`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                     body: JSON.stringify({ action: "logout", params: {} }),
                     keepalive: true
                 }).catch(() => {});
@@ -239,12 +239,12 @@ export default function VisorRemoto() {
         };
 
         window.addEventListener('beforeunload', handleUnload);
-        window.addEventListener('unload', handleUnload);
+        window.addEventListener('pagehide', handleUnload);
         return () => {
             window.removeEventListener('beforeunload', handleUnload);
-            window.removeEventListener('unload', handleUnload);
+            window.removeEventListener('pagehide', handleUnload);
         };
-    }, [autenticado, backendHost, sessionUuid]);
+    }, [autenticado, backendHost, sessionUuid, token]);
 
     const enviarComando = useCallback((comando: any) => {
         const payload = JSON.stringify(comando);
@@ -322,32 +322,37 @@ export default function VisorRemoto() {
 
     const conectarAgente = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!agenteOnline || !email || !sessionUuid) return;
+        if (!visorPin || !sessionUuid || !email) return;
         initAudio(); 
         cierreSesionVoluntarioRef.current = false;
         fallosConsecutivos.current = 0; 
         
         try {
-            setVerificando(true);
-            setEstado("Autenticando API Segura...");
-            const resAuth = await fetch(`https://${backendHost}/api/remote/auth/login`, {
+            setEstado("Autenticando PIN seguro...");
+            
+            const resAuth = await fetch(`https://${backendHost}/api/visor/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: PASSWORD_SECRETA }) 
+                body: JSON.stringify({ serial: sessionUuid, pin: visorPin }) 
             });
 
-            if (!resAuth.ok) throw new Error("Auth Failed");
+            if (!resAuth.ok) throw new Error("PIN Incorrecto o Caducado.");
             const { access_token } = await resAuth.json();
             setToken(access_token);
 
-            const resStatus = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`);
+            const resStatus = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`, {
+                headers: { 'Authorization': `Bearer ${access_token}` }
+            });
             const dataStatus = await resStatus.json();
+            
+            if (!dataStatus.is_online) throw new Error("El equipo está apagado.");
 
+            setDeviceType(dataStatus.device_type || "heavy");
             setEstado("Llamando a la puerta...");
             
             await fetch(`https://${backendHost}/api/app/request-access/${sessionUuid}`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${access_token}` },
                 body: JSON.stringify({ email: email }) 
             });
 
@@ -361,8 +366,6 @@ export default function VisorRemoto() {
 
         } catch (err: any) {
             setEstado(`FATAL: ${err.message}`);
-        } finally {
-            setVerificando(false);
         }
     };
 
@@ -489,7 +492,6 @@ export default function VisorRemoto() {
         cerrarSesion();
     };
 
-    // 🔥 BOTÓN CERRAR SESIÓN ROBUSTO CON ASYNC/AWAIT
     const cerrarSesion = useCallback(async () => {
         setEstado("C:\\>_ Liberando hardware de red...");
         
@@ -500,11 +502,13 @@ export default function VisorRemoto() {
         await enviarComandoSistema("logout"); 
         
         try {
-            // Hacemos un POST vacío. Sin JSON, directo al backend
-            await fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { 
-                method: 'POST',
-                keepalive: true
-            });
+            if (token) {
+                await fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { 
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                    keepalive: true
+                });
+            }
         } catch (e) {
             console.warn("La liberación forzada falló.");
         }
@@ -522,7 +526,7 @@ export default function VisorRemoto() {
         setAutenticado(false);
         setToken(null);
         setVistaActiva("desktop");
-    }, [enviarComandoSistema, backendHost, sessionUuid, tftpStagingFile]);
+    }, [enviarComandoSistema, backendHost, sessionUuid, tftpStagingFile, token]);
 
     const abrirMenuUpload = () => {
         if (!tftpConfigured) {
@@ -581,7 +585,9 @@ export default function VisorRemoto() {
                                 enviarComandoSistema("end_file_transfer", {});
                                 setEstado(`C:\\>_ Archivo en Raspberry. Iniciando TFTP hacia el router...`);
                                 
-                                enviarComandoSistema("macro_tftp_download", { filename: file.name, os: uploadOs, raspi_ip: ipManual || "192.168.1.135" });
+                                if (uploadOs !== "none") {
+                                    enviarComandoSistema("macro_tftp_download", { filename: file.name, os: uploadOs, raspi_ip: ipManual || "192.168.1.135" });
+                                }
                                 
                                 setTftpStagingFile(file.name);
                                 setTftpFase("transfiriendo");
@@ -662,11 +668,11 @@ export default function VisorRemoto() {
             {!autenticado && !esperandoAprobacion && (
                 <div className="flex-1 flex items-center justify-center bg-[#008080]">
                     <form onSubmit={conectarAgente} className={`${win95Window} w-[400px]`}>
-                        <div className={win95Title}><span>Terminal de Acceso SRA</span></div>
+                        <div className={win95Title}><span>Terminal de Acceso SRA Invitado</span></div>
                         <div className="p-4 flex flex-col gap-4">
                             <div className="flex items-center gap-4 mb-2">
                                 <span className="text-4xl">🌐</span>
-                                <div><p className="font-bold text-sm">Bienvenido a SRA Link</p><p className="text-xs">Escriba el ID del nodo para conectar.</p></div>
+                                <div><p className="font-bold text-sm">SRA Remote Link</p><p className="text-xs">Identifíquese con el PIN del equipo.</p></div>
                             </div>
                             <div className="flex flex-col gap-1">
                                 <label className="text-xs underline">Host (IP:Port):</label>
@@ -677,17 +683,20 @@ export default function VisorRemoto() {
                                 <input type="text" value={sessionUuid} onChange={(e) => setSessionUuid(e.target.value)} required className={win95Input} />
                             </div>
                             <div className="flex flex-col gap-1">
-                                <label className="text-xs underline">Email Operador:</label>
-                                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className={win95Input} />
+                                <label className="text-xs underline">Email del Ingeniero (Audit Logs):</label>
+                                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className={`${win95Input} lowercase`} placeholder="ingeniero@empresa.com" />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-xs underline">PIN de Soporte Remoto:</label>
+                                <input type="password" value={visorPin} onChange={(e) => setVisorPin(e.target.value)} required maxLength={6} className={`${win95Input} text-xl tracking-widest text-center`} placeholder="000000" />
                             </div>
                             <div className="flex items-center gap-2 mt-2">
                                 <div className={`w-3 h-3 border border-black ${verificando ? 'bg-yellow-400' : agenteOnline ? 'bg-[#00ff00]' : 'bg-red-600'}`} />
-                                <span className="text-xs font-bold">{verificando ? "Pinging..." : agenteOnline ? `Nodo ONLINE (${deviceType})` : "Nodo OFFLINE / Bloqueo"}</span>
+                                <span className="text-xs font-bold">{verificando ? "Pinging..." : agenteOnline ? `Nodo ONLINE` : "Nodo OFFLINE / Bloqueo"}</span>
                             </div>
                             <div className="flex justify-end gap-2 mt-4">
-                                <button type="button" className={win95Button}>Cancelar</button>
-                                <button type="submit" disabled={!agenteOnline || verificando || !email || !sessionUuid || esperandoAprobacion} className={win95Button}>
-                                    {esperandoAprobacion ? 'Solicitando...' : 'Conectar'}
+                                <button type="submit" disabled={!agenteOnline || verificando || !visorPin || !sessionUuid || !email || esperandoAprobacion} className={win95Button}>
+                                    {esperandoAprobacion ? 'Solicitando...' : 'Conectar y Validar PIN'}
                                 </button>
                             </div>
                             <div className="text-center mt-2"><span className="text-[10px] text-gray-700">{estado}</span></div>
@@ -702,9 +711,9 @@ export default function VisorRemoto() {
                         <div className={win95Title}><span>SRA Security Policy</span></div>
                         <div className="p-6 flex flex-col items-center gap-4 bg-[#c0c0c0]">
                             <span className="text-4xl animate-pulse">⏳</span>
-                            <p className="font-bold text-sm text-center">Esperando autorización...</p>
-                            <p className="text-xs text-center">La política Zero-Trust requiere que el administrador apruebe esta conexión en el SRA Center.</p>
-                            <button onClick={() => setEsperandoAprobacion(false)} className={`${win95Button} mt-2`}>Cancelar Solicitud</button>
+                            <p className="font-bold text-sm text-center">PIN Aceptado. Esperando MFA...</p>
+                            <p className="text-xs text-center">La política Zero-Trust requiere que el propietario del equipo autorice manualmente su conexión.</p>
+                            <button onClick={() => { setEsperandoAprobacion(false); setToken(null); }} className={`${win95Button} mt-2`}>Cancelar Solicitud</button>
                         </div>
                     </div>
                 </div>
@@ -837,6 +846,8 @@ export default function VisorRemoto() {
                                                     <option value="cisco">Cisco (copy tftp...)</option>
                                                     <option value="fortinet">Fortinet (execute restore...)</option>
                                                     <option value="paloalto">PaloAlto (tftp import...)</option>
+                                                    <option value="windows">Windows (tftp -i GET...)</option>
+                                                    <option value="none">Ninguno (Manual / TFTP64 Client)</option>
                                                 </select>
                                             </div>
                                             
@@ -851,7 +862,7 @@ export default function VisorRemoto() {
                                                 </label>
                                             </div>
                                             <p className="text-[10px] text-gray-700 italic">
-                                                Al seleccionar, el archivo se transferirá e inyectará automáticamente en el router.
+                                                Al seleccionar, el archivo se transferirá e inyectará automáticamente en el equipo destino.
                                             </p>
                                         </>
                                     )}
@@ -948,9 +959,9 @@ export default function VisorRemoto() {
                     )}
 
                     <div className="absolute bottom-0 left-0 w-full h-8 bg-[#c0c0c0] border-t-2 border-white border-b-2 border-b-black flex items-center justify-between px-1 z-50 shadow-[0_-1px_2px_rgba(0,0,0,0.2)]">
-                        <button className="bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-[#808080] border-r-[#808080] text-black px-2 h-6 flex items-center gap-1 font-bold text-xs"><span className="text-red-500">❖</span> SRA</button>
+                        <button className="bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-[#808080] border-r-[#808080] text-black px-2 h-6 flex items-center gap-1 font-bold text-xs"><span className="text-red-500">❖</span> SRA Guest</button>
                         <div className="flex items-center gap-2 h-full">
-                            <button onClick={cerrarSesion} className="text-xs hover:underline px-1 text-red-700 font-bold">Cerrar Sesión</button>
+                            <button onClick={cerrarSesion} className="text-xs hover:underline px-1 text-red-700 font-bold">Terminar Soporte</button>
                             <div className={`${win95Panel} px-2 h-6 flex items-center gap-2 text-xs ml-1 shadow-[inset_1px_1px_0_#808080]`}><div className={`w-2 h-2 rounded-full border border-[#808080] bg-[#00ff00]`} /><span>{hora}</span></div>
                         </div>
                     </div>
