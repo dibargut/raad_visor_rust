@@ -36,6 +36,11 @@ export default function VisorRemoto() {
     const [deviceType, setDeviceType] = useState<string>("heavy");
     const [esperandoAprobacion, setEsperandoAprobacion] = useState<boolean>(false);
     
+    const [kickedOut, setKickedOut] = useState<boolean>(false);
+
+    // 🔥 NUEVO ESTADO: Rastrea si estamos en modo hardware puro KVM
+    const [kvmActivo, setKvmActivo] = useState<boolean>(false);
+
     const [mostrarModalRed, setMostrarModalRed] = useState<boolean>(false);
     const [modoNetConf, setModoNetConf] = useState<string>("web"); 
     const [tipoRed, setTipoRed] = useState<string>("dhcp");
@@ -98,7 +103,6 @@ export default function VisorRemoto() {
         return () => clearInterval(interval);
     }, []);
 
-    // 🔥 PING PÚBLICO: Obtiene el status online sin necesidad de enviar Token/PIN
     const verificarEstadoAgente = useCallback(async () => {
         if (!backendHost || !sessionUuid) { setAgenteOnline(false); return; }
         setVerificando(true);
@@ -145,13 +149,13 @@ export default function VisorRemoto() {
     }, [esperandoAprobacion, backendHost, sessionUuid, token]);
 
     useEffect(() => {
-        if (!autenticado || !token) return;
+        if (!autenticado || !token || kickedOut) return;
         
         let gracePeriod = true;
         setTimeout(() => { gracePeriod = false; }, 8000);
 
         const intervalId = setInterval(async () => {
-            if (cierreSesionVoluntarioRef.current) return;
+            if (cierreSesionVoluntarioRef.current || kickedOut) return;
 
             try {
                 const res = await fetch(`https://${backendHost}/api/app/status/${sessionUuid}`, {
@@ -159,6 +163,14 @@ export default function VisorRemoto() {
                 });
                 if (res.ok) {
                     const data = await res.json();
+                    if (data.is_online && !data.mfa_authorized) {
+                        cierreSesionVoluntarioRef.current = true;
+                        if (peerRef.current) peerRef.current.close();
+                        if (wsRef.current) wsRef.current.close();
+                        setKickedOut(true);
+                        return;
+                    }
+
                     if (!data.is_online && !gracePeriod) {
                         fallosConsecutivos.current += 1;
                         if (fallosConsecutivos.current >= 3) setAgenteDesconectadoError(true);
@@ -180,7 +192,7 @@ export default function VisorRemoto() {
         }, 2000);
         
         return () => clearInterval(intervalId);
-    }, [autenticado, backendHost, sessionUuid, token]);
+    }, [autenticado, backendHost, sessionUuid, token, kickedOut]);
 
     useEffect(() => {
         if (agenteDesconectadoError && audioCtxRef.current) {
@@ -206,6 +218,44 @@ export default function VisorRemoto() {
         }
     }, [agenteDesconectadoError]);
 
+    // Sonido clásico de Error "TUM" (Windows 95 Chord Synth)
+    useEffect(() => {
+        if (kickedOut) {
+            try {
+                const ctx = audioCtxRef.current || new (window.AudioContext || (window as any).webkitAudioContext)();
+                if (ctx.state === 'suspended') ctx.resume();
+                
+                const freqs = [155.56, 185.00, 233.08, 311.13]; 
+                
+                freqs.forEach(f => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    
+                    osc.type = 'sawtooth';
+                    osc.frequency.value = f;
+                    
+                    gain.gain.setValueAtTime(0, ctx.currentTime);
+                    gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.05); 
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2); 
+                    
+                    const filter = ctx.createBiquadFilter();
+                    filter.type = 'lowpass';
+                    filter.frequency.setValueAtTime(1500, ctx.currentTime);
+                    filter.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 1);
+
+                    osc.connect(filter);
+                    filter.connect(gain);
+                    gain.connect(ctx.destination);
+                    
+                    osc.start();
+                    osc.stop(ctx.currentTime + 1.5);
+                });
+            } catch (e) {
+                console.warn("No se pudo sintetizar el sonido de error.", e);
+            }
+        }
+    }, [kickedOut]);
+
     const enviarComandoSistema = useCallback(async (action: string, params: any = {}) => {
         if (!token) return;
         try {
@@ -222,7 +272,7 @@ export default function VisorRemoto() {
 
     useEffect(() => {
         const handleUnload = () => {
-            if (autenticado && backendHost && sessionUuid && token) {
+            if (autenticado && backendHost && sessionUuid && token && !kickedOut) {
                 fetch(`https://${backendHost}/api/app/close-access/${sessionUuid}`, { 
                     method: 'POST', 
                     headers: { 'Authorization': `Bearer ${token}` },
@@ -244,7 +294,7 @@ export default function VisorRemoto() {
             window.removeEventListener('beforeunload', handleUnload);
             window.removeEventListener('pagehide', handleUnload);
         };
-    }, [autenticado, backendHost, sessionUuid, token]);
+    }, [autenticado, backendHost, sessionUuid, token, kickedOut]);
 
     const enviarComando = useCallback((comando: any) => {
         const payload = JSON.stringify(comando);
@@ -257,20 +307,20 @@ export default function VisorRemoto() {
 
     useEffect(() => {
         const handleKD = (e: KeyboardEvent) => {
-            if (vistaActiva !== "video" || agenteDesconectadoError) return;
+            if (vistaActiva !== "video" || agenteDesconectadoError || kickedOut) return;
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
             if (["Space", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); }
             enviarComando({ event: "key_down", key: e.key });
         };
         const handleKU = (e: KeyboardEvent) => {
-            if (vistaActiva !== "video" || agenteDesconectadoError) return;
+            if (vistaActiva !== "video" || agenteDesconectadoError || kickedOut) return;
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
             enviarComando({ event: "key_up", key: e.key });
         };
         window.addEventListener('keydown', handleKD, { passive: false });
         window.addEventListener('keyup', handleKU, { passive: false });
         return () => { window.removeEventListener('keydown', handleKD); window.removeEventListener('keyup', handleKU); };
-    }, [vistaActiva, agenteDesconectadoError, enviarComando]);
+    }, [vistaActiva, agenteDesconectadoError, kickedOut, enviarComando]);
 
     const obtenerCoordenadasRelativas = (e: React.MouseEvent<HTMLVideoElement>): CoordenadasRelativas | null => {
         if (!videoRef.current) return null;
@@ -385,6 +435,16 @@ export default function VisorRemoto() {
 
             ws.onmessage = async (event: MessageEvent) => {
                 const msg = JSON.parse(event.data);
+
+                if (msg.action === 'logout') {
+                    console.warn("💀 Asesinato de conexión recibido desde el servidor.");
+                    cierreSesionVoluntarioRef.current = true;
+                    if (peerRef.current) peerRef.current.close();
+                    if (wsRef.current) wsRef.current.close();
+                    setKickedOut(true);
+                    return; 
+                }
+
                 if (msg.type_ === 'ready') {
                     iceQueueRef.current = [];
                     isSdpProcessingRef.current = true;
@@ -468,13 +528,30 @@ export default function VisorRemoto() {
         setTimeout(() => enviarComandoSistema("start_kiosk", { url: urlNavegacion }), 2000);
     };
 
+    // 🔥 NUEVA FUNCIÓN: Toggle para Modo KVM Hardware
+    const toggleKvm = () => {
+        if (!kvmActivo) {
+            setVistaActiva("video");
+            setEstado("C:\\>_ KVM OUT-OF-BAND Activado. Leyendo /dev/video0...");
+            enviarComandoSistema("start_kvm"); 
+            setKvmActivo(true);
+        } else {
+            volverAlEscritorio();
+        }
+    };
+
     const abrirMinicom = () => {
         setVistaActiva("terminal");
         setEstado("C:\\>_ Enlazando Terminal Serie Web...");
     };
 
+    // 🔥 ACTUALIZADO: Considerar el apagado del KVM
     const volverAlEscritorio = () => {
-        enviarComandoSistema("stop_kiosk"); 
+        if (kvmActivo) {
+            enviarComandoSistema("stop_kvm");
+        } else {
+            enviarComandoSistema("stop_kiosk"); 
+        }
         
         if (peerRef.current) { peerRef.current.close(); peerRef.current = null; }
         if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
@@ -483,13 +560,19 @@ export default function VisorRemoto() {
         if (videoRef.current) { videoRef.current.srcObject = null; }
         
         setVistaActiva("desktop");
-        setEstado("C:\\>_ Kiosco y túnel de vídeo cerrados. CPU liberada.");
+        setEstado("C:\\>_ Túnel de vídeo cerrado. CPU liberada.");
         setFps(0);
+        setKvmActivo(false);
     };
     
     const cerrarPopupYExpulsar = () => {
         setAgenteDesconectadoError(false);
         cerrarSesion();
+    };
+
+    const handleAceptarWin95 = () => {
+        setKickedOut(false);
+        window.location.reload(); 
     };
 
     const cerrarSesion = useCallback(async () => {
@@ -526,6 +609,7 @@ export default function VisorRemoto() {
         setAutenticado(false);
         setToken(null);
         setVistaActiva("desktop");
+        setKvmActivo(false); // Reseteo de KVM
     }, [enviarComandoSistema, backendHost, sessionUuid, tftpStagingFile, token]);
 
     const abrirMenuUpload = () => {
@@ -658,7 +742,7 @@ export default function VisorRemoto() {
     };
 
     const navegarUrl = () => {
-        if (!urlNavegacion.trim()) return;
+        if (!urlNavegacion.trim() || kvmActivo) return; // Si es KVM, la navegación web no aplica
         setEstado(`C:\\>_ Navegando a ${urlNavegacion}...`);
         enviarComandoSistema("start_kiosk", { url: urlNavegacion });
     };
@@ -726,12 +810,28 @@ export default function VisorRemoto() {
                             <span className="text-4xl">C:\</span>
                             <span className="bg-blue-800 px-1">Minicom</span>
                         </div>
+                        
                         {deviceType === "heavy" && (
-                            <div tabIndex={0} onClick={abrirKiosco} className={desktopIcon}>
-                                <span className="text-4xl">🌐</span>
-                                <span className="bg-blue-800 px-1">Web_Nav</span>
-                            </div>
+                            <>
+                                <div tabIndex={0} onClick={abrirKiosco} className={desktopIcon}>
+                                    <span className="text-4xl">🌐</span>
+                                    <span className="bg-blue-800 px-1">Web_Nav</span>
+                                </div>
+                                
+                                {/* 🔥 NUEVO: BOTÓN MAESTRO KVM OOB */}
+                                <div 
+                                    tabIndex={0} 
+                                    onClick={toggleKvm} 
+                                    className={`flex flex-col items-center justify-start gap-1 p-2 w-20 text-white text-xs text-center cursor-pointer border border-transparent select-none transition-all ${kvmActivo ? 'bg-red-900 border-red-500 shadow-[0_0_15px_rgba(220,38,38,0.8)] animate-pulse' : 'hover:border-white/50 focus:bg-[#0000A0] focus:border-[#0000A0] focus:outline-dotted focus:outline-1 focus:outline-yellow-400'}`}
+                                >
+                                    <span className="text-4xl">🖥️</span>
+                                    <span className={`${kvmActivo ? 'bg-red-600 font-bold' : 'bg-blue-800'} px-1 w-full`}>
+                                        {kvmActivo ? "STOP KVM" : "KVM OOB"}
+                                    </span>
+                                </div>
+                            </>
                         )}
+
                         <div 
                             tabIndex={tftpConfigured ? 0 : -1} 
                             onClick={tftpConfigured ? abrirMenuUpload : () => setEstado("C:\\>_ [BLOQUEO] Configura primero la IP TFTP en NetConf.")} 
@@ -751,12 +851,13 @@ export default function VisorRemoto() {
                         <div className="absolute top-8 left-28 right-8 bottom-16 flex flex-col z-10">
                             <div className={`${win95Window} w-full h-full flex flex-col shadow-[4px_4px_0_#000]`}>
                                 <div className={win95Title}>
-                                    <div className="flex items-center gap-2"><span>🌐 SRA Gráfico</span></div>
+                                    <div className="flex items-center gap-2"><span>🌐 SRA Gráfico {kvmActivo ? "[MODO HARDWARE]" : ""}</span></div>
                                     <button onClick={volverAlEscritorio} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
                                 </div>
                                 <div className={`flex-1 m-1 border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white overflow-hidden bg-black flex flex-col relative`}>
                                     
-                                    {vistaActiva === "video" && (
+                                    {/* Si KVM está activo, ocultamos la barra de navegación porque estamos viendo la salida HDMI */}
+                                    {vistaActiva === "video" && !kvmActivo && (
                                         <div className="bg-[#c0c0c0] p-1 flex items-center gap-2 border-b-2 border-black w-full shrink-0">
                                             <span className="text-xs font-bold pl-1 text-black">Dirección:</span>
                                             <input 
@@ -966,6 +1067,48 @@ export default function VisorRemoto() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* 🔥 MODAL ESTILO WINDOWS 95 PARA EXPULSIÓN DE ADMINISTRADOR */}
+            {kickedOut && (
+              <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                <div 
+                  className="w-[400px] bg-[#c0c0c0] border-t-[3px] border-l-[3px] border-t-white border-l-white border-b-[3px] border-r-[3px] border-b-black border-r-black p-[2px] font-sans"
+                  style={{ fontFamily: 'Tahoma, Arial, sans-serif' }}
+                >
+                  <div className="bg-[#000080] text-white flex justify-between items-center px-2 py-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm tracking-wide">SRA_KVM_Viewer.exe - Acceso Denegado</span>
+                    </div>
+                    <button 
+                      onClick={handleAceptarWin95}
+                      className="bg-[#c0c0c0] text-black font-bold text-xs px-2 py-0.5 border-t-2 border-l-2 border-white border-b-2 border-r-2 border-black active:border-t-black active:border-l-black active:border-b-white active:border-r-white leading-none"
+                    >
+                      X
+                    </button>
+                  </div>
+
+                  <div className="flex items-start p-6 gap-5 mt-2">
+                    <div className="w-10 h-10 rounded-full bg-red-600 border-[3px] border-[#c0c0c0] outline outline-2 outline-white flex items-center justify-center shrink-0 shadow-sm mt-1">
+                      <span className="text-white font-bold text-2xl leading-none font-mono">X</span>
+                    </div>
+                    
+                    <div className="text-black text-sm pt-1 font-medium">
+                      <p>El administrador del sistema ha revocado su acceso remoto de forma inmediata.</p>
+                      <p className="mt-4">La conexión de red física y la transmisión de vídeo han sido aniquiladas.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-center mb-5 mt-4">
+                    <button 
+                      onClick={handleAceptarWin95}
+                      className="bg-[#c0c0c0] text-black px-10 py-1.5 border-t-[2.5px] border-l-[2.5px] border-white border-b-[2.5px] border-r-[2.5px] border-black focus:outline focus:outline-1 focus:outline-black focus:outline-offset-2 active:border-t-black active:border-l-black active:border-b-white active:border-r-white font-bold text-sm"
+                    >
+                      Aceptar
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
         </div>
     );
