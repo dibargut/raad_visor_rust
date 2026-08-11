@@ -37,8 +37,6 @@ export default function VisorRemoto() {
     const [esperandoAprobacion, setEsperandoAprobacion] = useState<boolean>(false);
     
     const [kickedOut, setKickedOut] = useState<boolean>(false);
-
-    // 🔥 NUEVO ESTADO: Rastrea si estamos en modo hardware puro KVM
     const [kvmActivo, setKvmActivo] = useState<boolean>(false);
 
     const [mostrarModalRed, setMostrarModalRed] = useState<boolean>(false);
@@ -218,7 +216,6 @@ export default function VisorRemoto() {
         }
     }, [agenteDesconectadoError]);
 
-    // Sonido clásico de Error "TUM" (Windows 95 Chord Synth)
     useEffect(() => {
         if (kickedOut) {
             try {
@@ -309,12 +306,15 @@ export default function VisorRemoto() {
         const handleKD = (e: KeyboardEvent) => {
             if (vistaActiva !== "video" || agenteDesconectadoError || kickedOut) return;
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-            if (["Space", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); }
+            if (["Space", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Meta", "OS", "Win"].includes(e.key)) { 
+                e.preventDefault(); 
+            }
             enviarComando({ event: "key_down", key: e.key });
         };
         const handleKU = (e: KeyboardEvent) => {
             if (vistaActiva !== "video" || agenteDesconectadoError || kickedOut) return;
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+            if (["Meta", "OS", "Win"].includes(e.key)) { e.preventDefault(); }
             enviarComando({ event: "key_up", key: e.key });
         };
         window.addEventListener('keydown', handleKD, { passive: false });
@@ -326,26 +326,26 @@ export default function VisorRemoto() {
         if (!videoRef.current) return null;
         const video = videoRef.current;
         const rect = video.getBoundingClientRect();
-        if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+        
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+        
+        if (!videoWidth || !videoHeight) return null;
 
-        const videoRatio = video.videoWidth / video.videoHeight;
-        const elementRatio = rect.width / rect.height;
-        let renderWidth, renderHeight, xOffset = 0, yOffset = 0;
+        const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
+        const renderedWidth = videoWidth * scale;
+        const renderedHeight = videoHeight * scale;
 
-        if (elementRatio > videoRatio) {
-            renderHeight = rect.height;
-            renderWidth = renderHeight * videoRatio;
-            xOffset = (rect.width - renderWidth) / 2;
-        } else {
-            renderWidth = rect.width;
-            renderHeight = renderWidth / videoRatio;
-            yOffset = (rect.height - renderHeight) / 2;
-        }
+        const offsetX = (rect.width - renderedWidth) / 2;
+        const offsetY = (rect.height - renderedHeight) / 2;
 
-        const x_pixel = e.clientX - rect.left - xOffset;
-        const y_pixel = e.clientY - rect.top - yOffset;
-        if (x_pixel < 0 || x_pixel > renderWidth || y_pixel < 0 || y_pixel > renderHeight) return null;
-        return { x: x_pixel, y: y_pixel, w: renderWidth, h: renderHeight };
+        let x_pixel = e.clientX - rect.left - offsetX;
+        let y_pixel = e.clientY - rect.top - offsetY;
+
+        x_pixel = Math.max(0, Math.min(x_pixel, renderedWidth));
+        y_pixel = Math.max(0, Math.min(y_pixel, renderedHeight));
+
+        return { x: x_pixel, y: y_pixel, w: renderedWidth, h: renderedHeight };
     };
 
     const manejarMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
@@ -528,7 +528,6 @@ export default function VisorRemoto() {
         setTimeout(() => enviarComandoSistema("start_kiosk", { url: urlNavegacion }), 2000);
     };
 
-    // 🔥 NUEVA FUNCIÓN: Toggle para Modo KVM Hardware
     const toggleKvm = () => {
         if (!kvmActivo) {
             setVistaActiva("video");
@@ -545,7 +544,6 @@ export default function VisorRemoto() {
         setEstado("C:\\>_ Enlazando Terminal Serie Web...");
     };
 
-    // 🔥 ACTUALIZADO: Considerar el apagado del KVM
     const volverAlEscritorio = () => {
         if (kvmActivo) {
             enviarComandoSistema("stop_kvm");
@@ -609,7 +607,7 @@ export default function VisorRemoto() {
         setAutenticado(false);
         setToken(null);
         setVistaActiva("desktop");
-        setKvmActivo(false); // Reseteo de KVM
+        setKvmActivo(false); 
     }, [enviarComandoSistema, backendHost, sessionUuid, tftpStagingFile, token]);
 
     const abrirMenuUpload = () => {
@@ -742,7 +740,7 @@ export default function VisorRemoto() {
     };
 
     const navegarUrl = () => {
-        if (!urlNavegacion.trim() || kvmActivo) return; // Si es KVM, la navegación web no aplica
+        if (!urlNavegacion.trim() || kvmActivo) return; 
         setEstado(`C:\\>_ Navegando a ${urlNavegacion}...`);
         enviarComandoSistema("start_kiosk", { url: urlNavegacion });
     };
@@ -818,7 +816,6 @@ export default function VisorRemoto() {
                                     <span className="bg-blue-800 px-1">Web_Nav</span>
                                 </div>
                                 
-                                {/* 🔥 NUEVO: BOTÓN MAESTRO KVM OOB */}
                                 <div 
                                     tabIndex={0} 
                                     onClick={toggleKvm} 
@@ -848,15 +845,15 @@ export default function VisorRemoto() {
                     </div>
 
                     {vistaActiva !== "desktop" && (
-                        <div className="absolute top-8 left-28 right-8 bottom-16 flex flex-col z-10">
-                            <div className={`${win95Window} w-full h-full flex flex-col shadow-[4px_4px_0_#000]`}>
+                        // 🔥 CAMBIO AQUÍ: Ocupa toda la pantalla salvo la barra inferior (bottom-8)
+                        <div className="absolute top-0 left-0 right-0 bottom-8 flex flex-col z-40">
+                            <div className={`${win95Window} w-full h-full flex flex-col border-0 shadow-none`}>
                                 <div className={win95Title}>
                                     <div className="flex items-center gap-2"><span>🌐 SRA Gráfico {kvmActivo ? "[MODO HARDWARE]" : ""}</span></div>
                                     <button onClick={volverAlEscritorio} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
                                 </div>
                                 <div className={`flex-1 m-1 border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white overflow-hidden bg-black flex flex-col relative`}>
                                     
-                                    {/* Si KVM está activo, ocultamos la barra de navegación porque estamos viendo la salida HDMI */}
                                     {vistaActiva === "video" && !kvmActivo && (
                                         <div className="bg-[#c0c0c0] p-1 flex items-center gap-2 border-b-2 border-black w-full shrink-0">
                                             <span className="text-xs font-bold pl-1 text-black">Dirección:</span>
@@ -1069,7 +1066,6 @@ export default function VisorRemoto() {
                 </div>
             )}
 
-            {/* 🔥 MODAL ESTILO WINDOWS 95 PARA EXPULSIÓN DE ADMINISTRADOR */}
             {kickedOut && (
               <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
                 <div 
