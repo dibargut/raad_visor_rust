@@ -69,8 +69,6 @@ export default function VisorRemoto() {
     const [vistaActiva, setVistaActiva] = useState<VistaApp>("desktop");
     const [hora, setHora] = useState<string>("");
 
-    const lastMouseMove = useRef<number>(0);
-    const frameCountRef = useRef<number>(0);
     const animationFrameIdRef = useRef<number | null>(null);
 
     const initAudio = () => {
@@ -322,11 +320,16 @@ export default function VisorRemoto() {
         return () => { window.removeEventListener('keydown', handleKD); window.removeEventListener('keyup', handleKU); };
     }, [vistaActiva, agenteDesconectadoError, kickedOut, enviarComando]);
 
+    const capturarRatonKVM = () => {
+        if (kvmActivo && videoRef.current) {
+            videoRef.current.requestPointerLock();
+        }
+    };
+
     const obtenerCoordenadasRelativas = (e: React.MouseEvent<HTMLVideoElement>): CoordenadasRelativas | null => {
         if (!videoRef.current) return null;
         const video = videoRef.current;
         const rect = video.getBoundingClientRect();
-        
         const videoWidth = video.videoWidth;
         const videoHeight = video.videoHeight;
         
@@ -349,25 +352,81 @@ export default function VisorRemoto() {
     };
 
     const manejarMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
-        const ahora = Date.now();
-        if (ahora - lastMouseMove.current < 33) return; 
-        lastMouseMove.current = ahora;
-        const coords = obtenerCoordenadasRelativas(e);
-        if (coords) enviarComando({ event: "mouse_move", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+        if (kvmActivo) {
+            if (document.pointerLockElement === videoRef.current) {
+                if (e.movementX !== 0 || e.movementY !== 0) {
+                    enviarComando({ 
+                        event: "mouse_move", 
+                        delta_x: e.movementX, 
+                        delta_y: e.movementY, 
+                        left: (e.buttons & 1) !== 0,
+                        right: (e.buttons & 2) !== 0,
+                        middle: (e.buttons & 4) !== 0
+                    });
+                }
+            }
+        } else {
+            const coords = obtenerCoordenadasRelativas(e);
+            if (coords) {
+                if (e.buttons > 0) {
+                    let btn = "left";
+                    if (e.buttons & 2) btn = "right";
+                    else if (e.buttons & 4) btn = "middle";
+                    enviarComando({ event: "mouse_down", button: btn, x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+                } else {
+                    enviarComando({ event: "mouse_move", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+                }
+            }
+        }
     };
 
     const manejarMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
-        const coords = obtenerCoordenadasRelativas(e);
-        if (coords) enviarComando({ event: "mouse_down", button: e.button === 2 ? "right" : "left", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+        if (kvmActivo) {
+            enviarComando({ 
+                event: "mouse_down", 
+                delta_x: 0, delta_y: 0, 
+                left: (e.buttons & 1) !== 0 || e.button === 0,
+                right: (e.buttons & 2) !== 0 || e.button === 2,
+                middle: (e.buttons & 4) !== 0 || e.button === 1
+            });
+        } else {
+            const coords = obtenerCoordenadasRelativas(e);
+            let btn = "left";
+            if (e.button === 2) btn = "right";
+            else if (e.button === 1) btn = "middle";
+            if (coords) enviarComando({ event: "mouse_down", button: btn, x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+        }
     };
 
     const manejarMouseUp = (e: React.MouseEvent<HTMLVideoElement>) => {
-        const coords = obtenerCoordenadasRelativas(e);
-        if (coords) enviarComando({ event: "mouse_up", button: e.button === 2 ? "right" : "left", x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+        if (kvmActivo) {
+            enviarComando({ 
+                event: "mouse_up", 
+                delta_x: 0, delta_y: 0, 
+                left: (e.buttons & 1) !== 0,
+                right: (e.buttons & 2) !== 0,
+                middle: (e.buttons & 4) !== 0 
+            });
+        } else {
+            const coords = obtenerCoordenadasRelativas(e);
+            let btn = "left";
+            if (e.button === 2) btn = "right";
+            else if (e.button === 1) btn = "middle";
+            if (coords) enviarComando({ event: "mouse_up", button: btn, x_píxel: coords.x, y_píxel: coords.y, w_nativa: coords.w, h_nativa: coords.h });
+        }
     };
 
     const manejarScroll = (e: React.WheelEvent<HTMLVideoElement>) => {
-        enviarComando({ event: "scroll", delta_x: Math.round(e.deltaX), delta_y: Math.round(-e.deltaY) });
+        if (kvmActivo) {
+            enviarComando({ 
+                event: "scroll", 
+                delta_x: 0, 
+                delta_y: e.deltaY > 0 ? -1 : 1, 
+                left: false, right: false, middle: false
+            });
+        } else {
+            enviarComando({ event: "scroll", delta_x: Math.round(e.deltaX), delta_y: Math.round(-e.deltaY) });
+        }
     };
 
     const conectarAgente = async (e: React.FormEvent) => {
@@ -420,7 +479,6 @@ export default function VisorRemoto() {
     };
 
     const contarFrames = useCallback(() => {
-        if (videoRef.current && !videoRef.current.paused) frameCountRef.current++;
         animationFrameIdRef.current = requestAnimationFrame(contarFrames);
     }, []);
 
@@ -521,19 +579,28 @@ export default function VisorRemoto() {
         }
     }, [vistaActiva]);
 
-    const abrirKiosco = () => {
-        setVistaActiva("video");
-        setEstado("C:\\>_ Levantando Túnel Pesado...");
-        enviarComandoSistema("init_p2p");
-        setTimeout(() => enviarComandoSistema("start_kiosk", { url: urlNavegacion }), 2000);
+    // 🔥 EL GRAN ARREGLO DE LA CONDICIÓN DE CARRERA
+    // 1. Establecemos la vista "video" INMEDIATAMENTE para que React encienda su WebSocket.
+    // 2. Disparamos `init_p2p` a Rust. Como React ya está escuchando, cazará el "ready" de Rust a la primera.
+    // 3. Esperamos 1.5s asíncronos y entonces le decimos a Chromium que arranque la URL.
+    const abrirKiosco = async () => {
+        setEstado("C:\\>_ Levantando Túnel y Kiosco...");
+        setVistaActiva("video"); 
+        
+        await enviarComandoSistema("init_p2p");
+        
+        setTimeout(() => {
+            enviarComandoSistema("start_kiosk", { url: urlNavegacion });
+        }, 1500);
     };
 
-    const toggleKvm = () => {
+    const toggleKvm = async () => {
         if (!kvmActivo) {
-            setVistaActiva("video");
-            setEstado("C:\\>_ KVM OUT-OF-BAND Activado. Leyendo /dev/video0...");
-            enviarComandoSistema("start_kvm"); 
+            setEstado("C:\\>_ Levantando hardware USB y P2P...");
+            setVistaActiva("video"); 
             setKvmActivo(true);
+            
+            await enviarComandoSistema("start_kvm"); 
         } else {
             volverAlEscritorio();
         }
@@ -845,15 +912,20 @@ export default function VisorRemoto() {
                     </div>
 
                     {vistaActiva !== "desktop" && (
-                        // 🔥 CAMBIO AQUÍ: Ocupa toda la pantalla salvo la barra inferior (bottom-8)
                         <div className="absolute top-0 left-0 right-0 bottom-8 flex flex-col z-40">
                             <div className={`${win95Window} w-full h-full flex flex-col border-0 shadow-none`}>
                                 <div className={win95Title}>
                                     <div className="flex items-center gap-2"><span>🌐 SRA Gráfico {kvmActivo ? "[MODO HARDWARE]" : ""}</span></div>
                                     <button onClick={volverAlEscritorio} className="bg-[#c0c0c0] text-black px-1.5 font-bold border-2 border-t-white border-l-white border-b-black border-r-black text-[10px] active:border-t-black active:border-l-black active:border-b-white active:border-r-white">X</button>
                                 </div>
-                                <div className={`flex-1 m-1 border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white overflow-hidden bg-black flex flex-col relative`}>
+                                <div className={`flex-1 m-1 border-2 border-t-[#808080] border-l-[#808080] border-b-white border-r-white overflow-hidden bg-black flex flex-col relative min-h-0`}>
                                     
+                                    {vistaActiva === "video" && kvmActivo && (
+                                        <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-yellow-400 text-black px-4 py-1 text-xs font-bold border-2 border-black z-50 opacity-80 pointer-events-none">
+                                            Haz clic en el vídeo para capturar el ratón. Pulsa ESC para salir.
+                                        </div>
+                                    )}
+
                                     {vistaActiva === "video" && !kvmActivo && (
                                         <div className="bg-[#c0c0c0] p-1 flex items-center gap-2 border-b-2 border-black w-full shrink-0">
                                             <span className="text-xs font-bold pl-1 text-black">Dirección:</span>
@@ -874,19 +946,22 @@ export default function VisorRemoto() {
                                     )}
 
                                     {vistaActiva === "video" && (
-                                        <video 
-                                            ref={videoRef} 
-                                            autoPlay 
-                                            playsInline 
-                                            muted 
-                                            onMouseMove={manejarMouseMove} 
-                                            onMouseDown={manejarMouseDown} 
-                                            onMouseUp={manejarMouseUp} 
-                                            onWheel={manejarScroll} 
-                                            onContextMenu={(e) => e.preventDefault()} 
-                                            className="w-full flex-1 object-contain cursor-crosshair focus:outline-none" 
-                                            tabIndex={0}
-                                        />
+                                        <div className="flex-1 w-full h-full relative min-h-0 bg-black">
+                                            <video 
+                                                ref={videoRef} 
+                                                autoPlay 
+                                                playsInline 
+                                                muted 
+                                                onClick={capturarRatonKVM}
+                                                onMouseMove={manejarMouseMove} 
+                                                onMouseDown={manejarMouseDown} 
+                                                onMouseUp={manejarMouseUp} 
+                                                onWheel={manejarScroll} 
+                                                onContextMenu={(e) => e.preventDefault()} 
+                                                className="absolute inset-0 w-full h-full object-contain focus:outline-none cursor-crosshair" 
+                                                tabIndex={0}
+                                            />
+                                        </div>
                                     )}
                                     {vistaActiva === "terminal" && (
                                         <div className="w-full h-full text-green-400 p-1">
